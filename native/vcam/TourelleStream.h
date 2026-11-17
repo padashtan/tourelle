@@ -30,7 +30,7 @@ public:
     IFACEMETHODIMP BeginGetEvent(IMFAsyncCallback* callback, IUnknown* state) override;
     IFACEMETHODIMP EndGetEvent(IMFAsyncResult* result, IMFMediaEvent** event) override;
     IFACEMETHODIMP QueueEvent(MediaEventType type, REFGUID extendedType, HRESULT status,
-                              const PROPVARIANT* value) override;
+                              const PROPVARIANT* eventValue) override;
 
     // IMFMediaStream
     IFACEMETHODIMP GetMediaSource(IMFMediaSource** source) override;

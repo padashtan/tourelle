@@ -47,9 +47,9 @@ jobs:
         shell: pwsh
         run: |
           $root = 'dist\tourelle'
-          New-Item -ItemType Directory -Force "$root\bin", "$root\tools" | Out-Null
-          Copy-Item build\Release\TourelleCamera.dll, build\Release\tourelle.exe, build\Release\uvcgrab.exe "$root\bin"
-          Copy-Item tools\*.ps1 "$root\tools"
+          New-Item -ItemType Directory -Force "$root\tools" | Out-Null
+          Copy-Item build\Release\Tourelle.exe, build\Release\TourelleCamera.dll, build\Release\tourelle-cli.exe $root
+          Copy-Item build\Release\uvcgrab.exe, tools\dumpdesc.ps1 "$root\tools"
           Copy-Item README.md, LICENSE $root
           Compress-Archive -Path "$root\*" -DestinationPath dist\tourelle-windows-x64.zip
 

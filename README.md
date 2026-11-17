@@ -32,7 +32,7 @@ Other cameras with the same USB ID (the Orbit AF shares it) should work. They ar
  Teams / Zoom / OBS / Camera app
             │  "Tourelle Camera"  (Windows 11 virtual camera, Frame Server)
             ▼
- TourelleCamera.dll  ── Media Foundation source ── IKsControl ◄── tourelle.exe move / reset
+ TourelleCamera.dll  ── Media Foundation source ── IKsControl ◄── Tourelle.exe (arrows) / tourelle-cli
             │  user-mode UVC driver: probe/commit, isochronous streaming, frame assembly
             ▼
  WinUSB (Microsoft driver, bound to the camera's video function)
@@ -53,42 +53,27 @@ ends and the protocol details.
 
 ## Install
 
-You need administrator rights (UAC prompts appear).
-
 1. Download `tourelle-windows-x64.zip` from the [Releases](../../releases) page and extract it.
-2. Plug in the camera, then open PowerShell in the extracted folder:
+2. Plug in the camera and run **`Tourelle.exe`**.
+3. Click **Install** and accept the administrator prompt. Tourelle then:
+   - hands the camera's video function to Microsoft's WinUSB driver;
+   - installs its camera source in `C:\Program Files\Tourelle`;
+   - registers the **Tourelle Camera** virtual camera for your user.
 
-   ```powershell
-   # 1. Hand the camera's video function to WinUSB (the video leaves usbvideo.sys)
-   .\tools\tourelle-driver.ps1 -Bind
-   # 2. Install the virtual camera source (copied to C:\Program Files\Tourelle)
-   .\tools\install-vcam.ps1
-   # 3. Register the "Tourelle Camera" virtual camera for your user
-   .\bin\tourelle.exe install
-   ```
-
-3. In your video app, select **Tourelle Camera**.
-
-> If PowerShell refuses to run the scripts, start it with
-> `powershell -ExecutionPolicy Bypass`, or unblock the files with `Unblock-File`.
+The live preview starts as soon as setup is done.
 
 ## Use
 
-```powershell
-.\bin\tourelle.exe move 640 0     # pan right 10°   (units: 1/64 degree)
-.\bin\tourelle.exe move 0 -320    # tilt down 5°
-.\bin\tourelle.exe reset          # recenter the head
-```
-
-The commands work while an application is streaming, and also when no application is using the camera.
+- **In Tourelle.exe**: the arrow buttons or the keyboard arrows move the head,
+  and **⌂** or the Home key recenters it. You can also pick the step size (2° to 20°).
+- **In your video app**: select **Tourelle Camera**. Keep Tourelle.exe open next
+  to it and steer the head during the call. Several apps can use the camera at the same time.
+- **From scripts**: `tourelle-cli move <pan°> <tilt°>` and `tourelle-cli reset`.
 
 ## Uninstall
 
-```powershell
-.\bin\tourelle.exe remove                # remove the virtual camera
-.\tools\install-vcam.ps1 -Uninstall      # remove the media source
-.\tools\tourelle-driver.ps1 -Unbind      # give the camera back to usbvideo.sys
-```
+In Tourelle.exe, click **Uninstall**. The camera goes back to the Windows driver,
+and the camera source and the virtual camera are removed.
 
 ## Build from source
 
@@ -102,8 +87,9 @@ The outputs land in `native\build\`:
 
 | File | Description |
 |---|---|
-| `TourelleCamera.dll` | Media Foundation source loaded by the Frame Server |
-| `tourelle.exe` | Virtual camera registration and motor commands |
+| `Tourelle.exe` | The app: live preview, pan/tilt controls, one-click install/uninstall |
+| `TourelleCamera.dll` | Media Foundation source loaded by the Frame Server (keep it next to Tourelle.exe) |
+| `tourelle-cli.exe` | Scripting: `enable`, `remove`, `move`, `reset` |
 | `uvcgrab.exe` | Stand-alone test: streams for about 10 s, moves the head during the stream, saves a frame |
 
 `tools\dumpdesc.ps1` dumps the raw USB descriptors, including the hidden
@@ -114,7 +100,7 @@ has the same layout.
 
 - Only 640×480 is published for now. The camera also offers MJPEG up to 960×720 and YUY2 up to 1600×1200 at 5 fps.
 - While Tourelle owns the camera, Windows sees only "Tourelle Camera", not the physical camera.
-- The WinUSB swap and the COM registration need administrator rights.
+- Install and uninstall need administrator rights (one UAC prompt each).
 - The motor protocol was confirmed on a single unit with firmware `0x0008`.
 
 ## Trademarks

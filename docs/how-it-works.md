@@ -101,8 +101,11 @@ Camera Frame Server loads it, so every application that lists cameras sees
 - The stream converts YUY2 to NV12, or passes YUY2 through, one sample per `RequestSample`.
 - The source owns the WinUSB handle while streaming. It opens the camera only briefly for a motor command when idle.
 - Motor commands come in through `IKsControl` on a private property set. Any
-  client can send them through the camera's media source, and `tourelle.exe`
-  does exactly that.
+  client can send them through the camera's media source. `Tourelle.exe`
+  does exactly that, and also shows the live preview.
+- `Tourelle.exe` also does the setup with a single UAC prompt. It binds WinUSB
+  through SetupAPI (the inbox `winusb.inf`, selected explicitly), writes the
+  `DeviceInterfaceGUIDs`, and registers the COM source machine-wide.
 
 ## Tools used
 

@@ -73,9 +73,9 @@ IFACEMETHODIMP TourelleStream::EndGetEvent(IMFAsyncResult* result, IMFMediaEvent
 }
 
 IFACEMETHODIMP TourelleStream::QueueEvent(MediaEventType type, REFGUID extendedType, HRESULT status,
-                                       const PROPVARIANT* value) {
+                                       const PROPVARIANT* eventValue) {
     std::lock_guard guard(lock_);
-    return shutdown_ ? MF_E_SHUTDOWN : queue_->QueueEventParamVar(type, extendedType, status, value);
+    return shutdown_ ? MF_E_SHUTDOWN : queue_->QueueEventParamVar(type, extendedType, status, eventValue);
 }
 
 // IMFMediaStream --------------------------------------------------------------
