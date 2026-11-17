@@ -1,0 +1,23 @@
+name: Camera report
+description: Help support another motorized camera
+labels: [camera]
+body:
+  - type: input
+    id: model
+    attributes:
+      label: Camera model and USB id
+      placeholder: e.g. QuickCam Orbit MP, 046D:08CC
+    validations:
+      required: true
+  - type: textarea
+    id: descriptor
+    attributes:
+      label: Descriptor dump
+      description: Output of `tools\dumpdesc.ps1 -HubInstance <hub> -Port <port>` (see CONTRIBUTING.md).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: What works, what does not

@@ -17,6 +17,8 @@ add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/W4> $<$<COMPILE_LANGUAGE:CXX>:/pe
 if(TOURELLE_WERROR)
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/WX>)
 endif()
+# Windows SDK headers are external: neither warnings nor code analysis apply to them.
+add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/external:anglebrackets> $<$<COMPILE_LANGUAGE:CXX>:/external:W0>)
 if(TOURELLE_ANALYZE)
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/analyze> $<$<COMPILE_LANGUAGE:CXX>:/analyze:external->)
 endif()

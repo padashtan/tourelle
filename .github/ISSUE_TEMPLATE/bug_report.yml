@@ -1,0 +1,38 @@
+name: Bug report
+description: Something does not work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Security issues: please use private reporting instead (see SECURITY.md).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, what you got.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: In Tourelle.exe, ☰ menu > Copy diagnostics, then paste here.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: app
+    attributes:
+      label: Video app involved (if any)
+      placeholder: Teams, Zoom, OBS, Windows Camera…
+  - type: dropdown
+    id: camera
+    attributes:
+      label: Camera
+      options:
+        - QuickCam Sphere AF (046D:0994)
+        - QuickCam Orbit AF (046D:0994)
+        - Other (please describe above)
+    validations:
+      required: true

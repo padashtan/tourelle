@@ -28,7 +28,9 @@ Status Query();
 std::wstring Describe();
 
 // Administrator half; run inside the elevated process. Throw std::exception on failure.
-void InstallElevated(const std::wstring& sourceDll);
+// requireCamera = false (installer): the driver switch is skipped when the camera is
+// not connected; Tourelle.exe offers it later.
+void InstallElevated(const std::wstring& sourceDll, bool requireCamera = true);
 void UninstallElevated();
 
 // Starts this executable elevated with one argument and waits for it.

@@ -214,6 +214,7 @@ DWORD ReadSetting(const wchar_t* name, DWORD fallback) {
 }
 
 void WriteSetting(const wchar_t* name, DWORD value) {
+    if (g.demo) return;  // the demo never touches the user's real settings
     RegSetKeyValueW(HKEY_CURRENT_USER, kSettingsKey, name, REG_DWORD, &value, sizeof(value));
 }
 
@@ -263,6 +264,7 @@ void SavePresetSetting(int index) {
 }
 
 void SaveLanguage() {
+    if (g.demo) return;
     const wchar_t* code = T().code;
     RegSetKeyValueW(HKEY_CURRENT_USER, kSettingsKey, L"Language", REG_SZ, code,
                     static_cast<DWORD>((wcslen(code) + 1) * sizeof(wchar_t)));
@@ -439,7 +441,7 @@ private:
 };
 
 void VideoLoop(HANDLE stop) {
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return;
     const auto stopped = [stop](DWORD milliseconds) { return WaitForSingleObject(stop, milliseconds) == WAIT_OBJECT_0; };
     while (!stopped(0)) {
         ComPtr<IMFMediaSource> source;
@@ -699,7 +701,10 @@ void Autofocus() {
     if (!g.setup.Ready() || g.autofocusing.exchange(true)) return;
     SetStatus(T().focusing);
     std::thread([] {
-        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
+            g.autofocusing = false;
+            return;
+        }
         const auto setFocus = [](int position) {
             if (g.demo) return;
             WithSource([position](IUnknown* source) {
@@ -728,12 +733,12 @@ void Autofocus() {
 // Face tracking ------------------------------------------------------------------
 
 void FollowLoop(HANDLE stop) {
-    RoInitialize(RO_INIT_MULTITHREADED);
-    auto tracker = tourelle::app::FaceTracker::Create();
+    const HRESULT runtime = RoInitialize(RO_INIT_MULTITHREADED);
+    auto tracker = SUCCEEDED(runtime) ? tourelle::app::FaceTracker::Create() : nullptr;
     if (!tracker) {
         PostStatus(T().followUnavailable);
         PostMessageW(g.window, WM_APP_FOLLOW_OFF, 0, 0);
-        RoUninitialize();
+        if (SUCCEEDED(runtime)) RoUninitialize();
         return;
     }
     ULONGLONG lastMove = 0;
@@ -948,6 +953,12 @@ void RefreshSetup() {
         g.setup = {true, true, true, true};
     } else {
         g.setup = tourelle::setup::Query();
+        // Machine-wide part done (by the installer or another user): register the
+        // virtual camera for this user, which needs no administrator rights.
+        if (g.setup.cameraPresent && g.setup.winusbBound && g.setup.sourceInstalled && !g.setup.virtualCameraListed &&
+            SUCCEEDED(tourelle::client::EnableVirtualCamera())) {
+            g.setup = tourelle::setup::Query();
+        }
     }
     const bool ready = g.setup.Ready();
     EnableWindow(g.install, !g.busy && !ready && !g.demo);
@@ -995,9 +1006,9 @@ void StartSetup(bool install) {
         tourelle::client::RemoveVirtualCamera();
     }
     std::thread([install] {
-        CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
         const int code = tourelle::setup::RunElevated(install ? L"--install" : L"--uninstall");
-        CoUninitialize();
+        if (SUCCEEDED(com)) CoUninitialize();
         PostMessageW(g.window, WM_APP_SETUP_DONE, install, static_cast<LPARAM>(code));
     }).detach();
 }
@@ -1034,6 +1045,7 @@ bool IsAutostart() {
 }
 
 void SetAutostart(bool enabled) {
+    if (g.demo) return;
     if (!enabled) {
         RegDeleteKeyValueW(HKEY_CURRENT_USER, kRunKey, kRunValue);
         return;
@@ -1903,7 +1915,7 @@ int RunApp(HINSTANCE instance, int show, bool trayOnly, bool demo) {
     LoadSettings();
     g.message = T().starting;
     g.trayHintShown = trayOnly;  // started with Windows: the user knows where it lives
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return 1;
     MFStartup(MF_VERSION);
     Gdiplus::GdiplusStartupInput gdiplusInput;
     Gdiplus::GdiplusStartup(&g.gdiplus, &gdiplusInput, nullptr);
@@ -1947,37 +1959,39 @@ int RunApp(HINSTANCE instance, int show, bool trayOnly, bool demo) {
     return 0;
 }
 
-int RunAdminTask(bool install) {
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+// quiet: run by the installer: no message box, camera optional.
+int RunAdminTask(bool install, bool quiet) {
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);  // SetupAPI works either way
     try {
         if (install) {
             wchar_t self[MAX_PATH];
             GetModuleFileNameW(nullptr, self, MAX_PATH);
             std::wstring dll = self;
             dll = dll.substr(0, dll.find_last_of(L'\\') + 1) + L"TourelleCamera.dll";
-            tourelle::setup::InstallElevated(dll);
+            tourelle::setup::InstallElevated(dll, !quiet);
         } else {
             tourelle::setup::UninstallElevated();
         }
-        CoUninitialize();
+        if (SUCCEEDED(com)) CoUninitialize();
         return 0;
     } catch (const std::exception& e) {
-        MessageBoxA(nullptr, e.what(), "Tourelle setup", MB_ICONERROR);
-        CoUninitialize();
+        if (!quiet) MessageBoxA(nullptr, e.what(), "Tourelle setup", MB_ICONERROR);
+        if (SUCCEEDED(com)) CoUninitialize();
         return 1;
     }
 }
 
 }  // namespace
 
-int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
+int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In_ int show) {
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     int result;
-    if (argc > 1 && _wcsicmp(argv[1], L"--install") == 0) {
-        result = RunAdminTask(true);
-    } else if (argc > 1 && _wcsicmp(argv[1], L"--uninstall") == 0) {
-        result = RunAdminTask(false);
+    const auto is = [&](const wchar_t* option) { return argc > 1 && _wcsicmp(argv[1], option) == 0; };
+    if (is(L"--install") || is(L"--install-quiet")) {
+        result = RunAdminTask(true, is(L"--install-quiet"));
+    } else if (is(L"--uninstall") || is(L"--uninstall-quiet")) {
+        result = RunAdminTask(false, is(L"--uninstall-quiet"));
     } else {
         const bool trayOnly = argc > 1 && _wcsicmp(argv[1], L"--tray") == 0;
         const bool demo = argc > 1 && _wcsicmp(argv[1], L"--demo") == 0;

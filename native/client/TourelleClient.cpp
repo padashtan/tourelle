@@ -46,7 +46,7 @@ HRESULT ForEachCamera(Visit visit) {
 bool IsTourelle(IMFActivate* device) {
     wchar_t* name = nullptr;
     UINT32 length = 0;
-    if (FAILED(device->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &name, &length))) return false;
+    if (FAILED(device->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &name, &length)) || !name) return false;
     const bool match = wcsstr(name, kTourelleCameraName) != nullptr;
     CoTaskMemFree(name);
     return match;

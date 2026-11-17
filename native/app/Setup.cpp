@@ -117,7 +117,8 @@ void InstallWinUsbDriver(const std::wstring& id) {
     params.Flags |= DI_ENUMSINGLEINF;
     params.FlagsEx |= DI_FLAGSEX_ALLOWEXCLUDEDDRVS;
     wchar_t windows[MAX_PATH];
-    GetWindowsDirectoryW(windows, MAX_PATH);
+    const UINT length = GetSystemWindowsDirectoryW(windows, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) Fail("GetSystemWindowsDirectory");
     swprintf_s(params.DriverPath, L"%s\\INF\\winusb.inf", windows);
     if (!SetupDiSetDeviceInstallParamsW(device.Set(), device.Data(), &params)) Fail("SetupDiSetDeviceInstallParams");
     if (!SetupDiBuildDriverInfoList(device.Set(), device.Data(), SPDIT_CLASSDRIVER)) Fail("SetupDiBuildDriverInfoList");
@@ -203,6 +204,22 @@ std::wstring RegisteredDllPath() {
     return path;
 }
 
+// True when both paths name the same existing file (compares volume and file id,
+// so different spellings of one path match).
+bool SameFile(const std::wstring& a, const std::wstring& b) {
+    const auto identify = [](const std::wstring& path, FILE_ID_INFO* id) {
+        HANDLE file = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                                  OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (file == INVALID_HANDLE_VALUE) return false;
+        const bool ok = GetFileInformationByHandleEx(file, FileIdInfo, id, sizeof(*id)) != FALSE;
+        CloseHandle(file);
+        return ok;
+    };
+    FILE_ID_INFO first{}, second{};
+    return identify(a, &first) && identify(b, &second) && first.VolumeSerialNumber == second.VolumeSerialNumber &&
+           memcmp(&first.FileId, &second.FileId, sizeof(first.FileId)) == 0;
+}
+
 // Deletes a file now, or at the next reboot if a process still has it loaded.
 void DeleteOrSchedule(const std::wstring& path) {
     if (DeleteFileW(path.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND) return;
@@ -227,7 +244,10 @@ void InstallSource(const std::wstring& sourceDll) {
     const std::wstring directory = InstallDirectory();
     CreateDirectoryW(directory.c_str(), nullptr);
     const std::wstring target = directory + L"\\" + kDllName;
-    if (!CopyFileW(sourceDll.c_str(), target.c_str(), FALSE)) {
+    if (SameFile(sourceDll, target)) {
+        // Installed by the setup program: the DLL is already in place. Copying a file
+        // onto itself fails, and the fallback below would delete it.
+    } else if (!CopyFileW(sourceDll.c_str(), target.c_str(), FALSE)) {
         // The Frame Server still has the previous version loaded: a loaded DLL
         // can be renamed, so park it and copy the new one in its place.
         DeleteOrSchedule(target);
@@ -314,11 +334,14 @@ std::wstring Describe() {
     return text;
 }
 
-void InstallElevated(const std::wstring& sourceDll) {
+void InstallElevated(const std::wstring& sourceDll, bool requireCamera) {
     InstallSource(sourceDll);
 
     const std::wstring id = FindVideoFunction(true);
-    if (id.empty()) throw std::runtime_error("Camera not connected (USB 046D:0994).");
+    if (id.empty()) {
+        if (!requireCamera) return;
+        throw std::runtime_error("Camera not connected (USB 046D:0994).");
+    }
     if (!IsWinUsb(id)) {
         const std::wstring originalClass = DevNodeProperty(id, CM_DRP_CLASSGUID);
         SetClassGuid(id, kUsbDeviceClass);
@@ -342,14 +365,19 @@ void UninstallElevated() {
 
 int RunElevated(const wchar_t* argument) {
     wchar_t self[MAX_PATH];
-    GetModuleFileNameW(nullptr, self, MAX_PATH);
+    const DWORD length = GetModuleFileNameW(nullptr, self, MAX_PATH);
+    if (length == 0 || length >= MAX_PATH) return static_cast<int>(ERROR_FILENAME_EXCED_RANGE);
     SHELLEXECUTEINFOW info{sizeof(info)};
     info.fMask = SEE_MASK_NOCLOSEPROCESS | SEE_MASK_NOASYNC;
     info.lpVerb = L"runas";
     info.lpFile = self;
     info.lpParameters = argument;
     info.nShow = SW_HIDE;
-    if (!ShellExecuteExW(&info)) return GetLastError() == ERROR_CANCELLED ? -1 : static_cast<int>(GetLastError());
+    if (!ShellExecuteExW(&info)) {
+        const DWORD error = GetLastError();
+        return error == ERROR_CANCELLED ? -1 : static_cast<int>(error);
+    }
+    if (!info.hProcess) return static_cast<int>(ERROR_INVALID_HANDLE);  // no process to wait for
     WaitForSingleObject(info.hProcess, INFINITE);
     DWORD code = 1;
     GetExitCodeProcess(info.hProcess, &code);

@@ -12,11 +12,13 @@ namespace tourelle {
 CoCreatableClass(TourelleActivate);
 }
 
-STDAPI DllGetClassObject(REFCLSID clsid, REFIID riid, LPVOID* object) {
+_Check_return_ STDAPI DllGetClassObject(_In_ REFCLSID clsid, _In_ REFIID riid, _Outptr_ LPVOID FAR* object) {
     return Module<InProc>::GetModule().GetClassObject(clsid, riid, object);
 }
 
-STDAPI DllCanUnloadNow() { return Module<InProc>::GetModule().Terminate() ? S_OK : S_FALSE; }
+__control_entrypoint(DllExport) STDAPI DllCanUnloadNow() {
+    return Module<InProc>::GetModule().Terminate() ? S_OK : S_FALSE;
+}
 
 BOOL WINAPI DllMain(HINSTANCE instance, DWORD reason, LPVOID) {
     if (reason == DLL_PROCESS_ATTACH) DisableThreadLibraryCalls(instance);

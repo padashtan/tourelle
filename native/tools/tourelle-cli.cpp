@@ -143,7 +143,7 @@ int wmain(int argc, wchar_t** argv) {
         return Usage();
     }
 
-    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return 1;
     MFStartup(MF_VERSION, MFSTARTUP_LITE);
     HRESULT hr;
     if (command == L"enable") {
@@ -162,8 +162,12 @@ int wmain(int argc, wchar_t** argv) {
                 // ReadSample blocks if no frame ever comes: give up after a while.
                 const UINT32 width = static_cast<UINT32>(_wtoi(argv[2])), height = static_cast<UINT32>(_wtoi(argv[3]));
                 HANDLE done = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+                if (!done) return 1;
                 std::thread([&, done] {
-                    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+                    if (FAILED(hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
+                        SetEvent(done);
+                        return;
+                    }
                     hr = Grab(source.Get(), width, height);
                     CoUninitialize();
                     SetEvent(done);

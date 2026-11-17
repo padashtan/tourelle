@@ -55,7 +55,7 @@ while ($i -lt $d.Length) {
     }
   }
   elseif ($type -eq 4) { $iface = $d[$i+2]; "INTERFACE $iface alt $($d[$i+3]) class $($d[$i+5]) subclass $($d[$i+6])"; $sub = $d[$i+6] }
-  elseif ($type -eq 0x24 -and $iface -ge 0 -and $sub -eq 1 -and $d[$i+5-3] -ne $null) {
+  elseif ($type -eq 0x24 -and $iface -ge 0 -and $sub -eq 1) {
     $st = $d[$i+2]
     switch ($st) {
       2 { $tt = [BitConverter]::ToUInt16($d, $i+4); "  INPUT_TERMINAL id $($d[$i+3]) type 0x{0:X4} raw {1}" -f $tt, ([BitConverter]::ToString($d, $i, $len)) }

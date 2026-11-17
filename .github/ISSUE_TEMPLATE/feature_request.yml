@@ -1,0 +1,11 @@
+name: Feature request
+description: An idea to make Tourelle better
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: What would you like to do?
+      description: Describe the need first; the solution can come later.
+    validations:
+      required: true

@@ -10,57 +10,126 @@ on:
 permissions:
   contents: read
 
+# Layers: build+unit tests gate the rest; analysis, sanitizer and lint run in
+# parallel; packaging, optional signing and the release come last.
 jobs:
   build:
     runs-on: windows-2022
+    outputs:
+      artifact-id: ${{ steps.upload.outputs.artifact-id }}
     steps:
       - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
-      - name: Configure
-        run: cmake -S native -B build -G "Visual Studio 17 2022" -A x64
+      - name: Configure and build (warnings are errors)
+        run: |
+          cmake -S native -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DTOURELLE_WERROR=ON
+          cmake --build build
 
-      - name: Build
-        run: cmake --build build --config Release
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure
 
-      - name: Check exports of the media source
+      - name: Check the media source binary
         shell: pwsh
         run: |
-          $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          $dumpbin = Get-ChildItem "$vs\VC\Tools\MSVC" -Recurse -Filter dumpbin.exe | Where-Object FullName -like '*Hostx64\x64*' | Select-Object -First 1
-          $exports = & $dumpbin.FullName /exports build\Release\TourelleCamera.dll | Out-String
+          $exports = dumpbin /exports build\TourelleCamera.dll | Out-String
           foreach ($name in 'DllGetClassObject', 'DllCanUnloadNow') {
             if ($exports -notmatch $name) { throw "TourelleCamera.dll does not export $name" }
           }
           # The Frame Server must not need a VC++ redistributable.
-          $deps = & $dumpbin.FullName /dependents build\Release\TourelleCamera.dll | Out-String
+          $deps = dumpbin /dependents build\TourelleCamera.dll | Out-String
           if ($deps -match 'VCRUNTIME|MSVCP') { throw "TourelleCamera.dll depends on the VC++ runtime:`n$deps" }
 
-      - name: Lint PowerShell scripts
-        shell: pwsh
-        run: |
-          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
-          $issues = Invoke-ScriptAnalyzer -Path tools -Severity Error
-          $issues | Format-Table -AutoSize
-          if ($issues) { throw "PSScriptAnalyzer found errors" }
-
-      - name: Package
+      - name: Package (zip)
         shell: pwsh
         run: |
           $root = 'dist\tourelle'
           New-Item -ItemType Directory -Force "$root\tools" | Out-Null
-          Copy-Item build\Release\Tourelle.exe, build\Release\TourelleCamera.dll, build\Release\tourelle-cli.exe $root
-          Copy-Item build\Release\uvcgrab.exe, tools\dumpdesc.ps1 "$root\tools"
-          Copy-Item README.md, LICENSE $root
+          Copy-Item build\Tourelle.exe, build\TourelleCamera.dll, build\tourelle-cli.exe $root
+          Copy-Item build\uvcgrab.exe, tools\dumpdesc.ps1 "$root\tools"
+          Copy-Item README.md, LICENSE, CHANGELOG.md $root
           Compress-Archive -Path "$root\*" -DestinationPath dist\tourelle-windows-x64.zip
 
-      - uses: actions/upload-artifact@v4
+      - name: Installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $version = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '0.3.0' }
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DAppVersion=$version" /DBinDir=..\build installer\Tourelle.iss
+          if ($LASTEXITCODE) { throw "ISCC failed" }
+
+      - id: upload
+        uses: actions/upload-artifact@v4
         with:
           name: tourelle-windows-x64
-          path: dist/tourelle-windows-x64.zip
+          path: |
+            dist/tourelle-windows-x64.zip
+            dist/tourelle-setup-*.exe
+
+  analyze:
+    needs: build
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: MSVC code analysis (/analyze, warnings are errors)
+        run: |
+          cmake -S native -B build-analyze -G Ninja -DCMAKE_BUILD_TYPE=Release -DTOURELLE_ANALYZE=ON -DTOURELLE_WERROR=ON
+          cmake --build build-analyze
+
+  sanitizer:
+    needs: build
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Unit tests under AddressSanitizer
+        run: |
+          cmake -S native -B build-asan -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DTOURELLE_ASAN=ON -DTOURELLE_WERROR=OFF
+          cmake --build build-asan --target tourelle-tests
+          ctest --test-dir build-asan --output-on-failure
+
+  lint:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: PSScriptAnalyzer
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -RequiredVersion 1.23.0 -Force -Scope CurrentUser
+          $issues = Invoke-ScriptAnalyzer -Path tools -Severity Error
+          $issues | Format-Table -AutoSize
+          if ($issues) { throw "PSScriptAnalyzer found errors" }
+
+  sign:
+    # Runs once SignPath is configured (see docs/signing.md).
+    if: startsWith(github.ref, 'refs/tags/v') && vars.SIGNPATH_ORGANIZATION_ID != ''
+    needs: [build, analyze, sanitizer, lint]
+    runs-on: windows-2022
+    steps:
+      - uses: signpath/github-action-submit-signing-request@v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          github-artifact-id: ${{ needs.build.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tourelle-windows-x64-signed
+          path: signed/
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [build, analyze, sanitizer, lint]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -68,8 +137,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: tourelle-windows-x64
-
       - uses: softprops/action-gh-release@v2
         with:
-          files: tourelle-windows-x64.zip
+          files: |
+            tourelle-windows-x64.zip
+            tourelle-setup-*.exe
           generate_release_notes: true
