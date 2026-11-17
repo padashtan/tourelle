@@ -1,0 +1,30 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Tourelle icon</title>
+<style>
+  html, body { margin: 0; width: 256px; height: 256px; background: transparent; overflow: hidden; }
+</style>
+</head>
+<body>
+<!-- App icon source: rendered to PNG then packed into native/app/tourelle.ico. -->
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <radialGradient id="shell" cx="38%" cy="32%" r="75%">
+      <stop offset="0" stop-color="#f4f6f8"/><stop offset=".55" stop-color="#b9c2cc"/><stop offset="1" stop-color="#58636f"/>
+    </radialGradient>
+    <radialGradient id="lens" cx="40%" cy="38%" r="70%">
+      <stop offset="0" stop-color="#3b5d86"/><stop offset=".45" stop-color="#101a26"/><stop offset="1" stop-color="#05080c"/>
+    </radialGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#0f1419"/>
+  <path d="M 196 70 A 92 92 0 0 1 196 186" fill="none" stroke="#f5a524" stroke-width="12" stroke-linecap="round"/>
+  <path d="M 60 70 A 92 92 0 0 0 60 186" fill="none" stroke="#f5a524" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="128" cy="128" r="70" fill="url(#shell)"/>
+  <circle cx="138" cy="122" r="38" fill="#1a232d"/>
+  <circle cx="138" cy="122" r="31" fill="url(#lens)"/>
+  <circle cx="128" cy="112" r="7" fill="#ffffff" opacity=".8"/>
+</svg>
+</body>
+</html>

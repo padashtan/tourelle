@@ -276,6 +276,9 @@ void UvcDevice::StreamLoop() {
         submitted[slot] = submit(slot, ok != FALSE);
     }
 
+    // A transfer may have been resubmitted after Stop() aborted the pipe: abort again
+    // from this thread so every pending transfer completes before the buffer goes away.
+    WinUsb_AbortPipe(stream_, streamEndpoint_);
     for (int slot = 0; slot < kTransfers; ++slot) {
         if (submitted[slot]) {
             ULONG ignored = 0;

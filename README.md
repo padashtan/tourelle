@@ -65,7 +65,11 @@ The live preview starts as soon as setup is done.
 ## Use
 
 - **In Tourelle.exe**: the arrow buttons or the keyboard arrows move the head,
-  and **⌂** or the Home key recenters it. You can also pick the step size (2° to 20°).
+  and **⌂** or the Home key recenters it. You can also pick the step size (2° to 20°, or keys 1–4).
+- **From the notification area**: closing the window keeps Tourelle next to the
+  clock. Click the icon to open it again; right-click it to recenter the head,
+  turn **Start with Windows** on or off, or quit. While the window is hidden, the
+  preview stops, so the camera is only busy when an app uses it.
 - **In your video app**: select **Tourelle Camera**. Keep Tourelle.exe open next
   to it and steer the head during the call. Several apps can use the camera at the same time.
 - **From scripts**: `tourelle-cli move <pan°> <tilt°>` and `tourelle-cli reset`.
@@ -87,7 +91,7 @@ The outputs land in `native\build\`:
 
 | File | Description |
 |---|---|
-| `Tourelle.exe` | The app: live preview, pan/tilt controls, one-click install/uninstall |
+| `Tourelle.exe` | The app: live preview, pan/tilt controls, notification area icon, one-click install/uninstall |
 | `TourelleCamera.dll` | Media Foundation source loaded by the Frame Server (keep it next to Tourelle.exe) |
 | `tourelle-cli.exe` | Scripting: `enable`, `remove`, `move`, `reset` |
 | `uvcgrab.exe` | Stand-alone test: streams for about 10 s, moves the head during the stream, saves a frame |
