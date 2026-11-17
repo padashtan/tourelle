@@ -466,10 +466,18 @@ void UninstallElevated() {
     // Every node of the camera's video function, plugged in or not (a phantom node
     // keeps its driver for next time). Only nodes Tourelle bound are touched: a
     // WinUSB binding made by another tool (without our interface GUID) is left alone.
+    // A failure on one node must not leave the camera source registered: finish the
+    // whole uninstall, then report the first error.
+    std::exception_ptr firstError;
     for (const std::wstring& id : VideoFunctions()) {
-        if (IsWinUsb(id) && HasTourelleInterface(id)) RemoveAndRescan(id);
+        try {
+            if (IsWinUsb(id) && HasTourelleInterface(id)) RemoveAndRescan(id);
+        } catch (...) {
+            if (!firstError) firstError = std::current_exception();
+        }
     }
     RemoveSource();
+    if (firstError) std::rethrow_exception(firstError);
 }
 
 int RunElevated(const wchar_t* argument) {

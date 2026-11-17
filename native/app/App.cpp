@@ -1980,9 +1980,13 @@ int RunAdminTask(bool install, bool quiet) {
 }  // namespace
 
 int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In_ int show) {
-    // Load DLLs from System32 only (static imports are covered by /DEPENDENTLOADFLAG):
-    // nothing placed next to Tourelle.exe gets loaded, even when it runs elevated.
+    // From here on, DLLs (including the delay-loaded imports and all their dependencies)
+    // come from System32 only: nothing placed next to Tourelle.exe gets loaded, even when
+    // it runs elevated from a user-writable folder. Before this line only KnownDLLs are
+    // loaded (see TOURELLE_DELAYLOAD_* in CMakeLists.txt).
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+    // Planted-DLL check used by the CI: reaching this line proves startup loaded none.
+    if (wcsstr(GetCommandLineW(), L"--self-test")) return 0;
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     int result;

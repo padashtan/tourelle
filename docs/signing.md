@@ -17,11 +17,23 @@ publisher of record.
    public build on GitHub Actions, and a short review.
 2. Once accepted, install the SignPath GitHub app on the repository and create a *signing policy* for
    release builds.
-3. Add these repository secrets: `SIGNPATH_API_TOKEN`, `SIGNPATH_ORGANIZATION_ID`.
-4. Add these repository variables: `SIGNPATH_PROJECT_SLUG`, `SIGNPATH_POLICY_SLUG`.
+3. Add one repository **secret** (*Settings > Secrets and variables > Actions > Secrets*):
+   `SIGNPATH_API_TOKEN`.
+4. Add three repository **variables** (same page, *Variables* tab, not *Secrets*):
+   `SIGNPATH_ORGANIZATION_ID`, `SIGNPATH_PROJECT_SLUG`, `SIGNPATH_POLICY_SLUG`. The workflow reads
+   them as `vars.*`. If you store the organization id as a secret, signing is silently skipped.
 
-The `sign` job in `.github/workflows/build.yml` runs only when `SIGNPATH_ORGANIZATION_ID` is set.
-Once it is set, the `release` job publishes only the signed files.
+The `sign` job in `.github/workflows/build.yml` runs only when the `SIGNPATH_ORGANIZATION_ID`
+variable is set. Once it is set, the `release` job publishes only the signed files. The job signs in
+three rounds, in this order:
+
+1. `TourelleCamera.dll`, the media source loaded by the Windows Frame Server.
+2. `Tourelle.exe` and `tourelle-cli.exe`, rebuilt around the **signed** DLL, which `Tourelle.exe`
+   embeds and installs.
+3. The installer, built from the signed executables.
+
+Each round is a separate SignPath signing request on a GitHub artifact. Allow the policy to sign PE
+files (`.dll` and `.exe`).
 
 Protect what feeds the signer:
 
@@ -43,5 +55,6 @@ identity validation, available to individuals in some countries.
 A certificate vouches for what it signs. Before applying:
 
 1. Run the security review again: see the latest report in the pull request or the release notes.
-2. Make sure the CI is green: build, `/analyze`, unit tests and the AddressSanitizer run.
+2. Make sure the CI is green: build, `/analyze`, unit tests, the AddressSanitizer run and the
+   planted-DLL test (`tools/test-planted-dlls.ps1`).
 3. Tag a release from `main` only, never from a local build.

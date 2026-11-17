@@ -25,6 +25,10 @@ Ce que j'en retiens :
 • Lire les données brutes (le descripteur USB ici) bat toutes les suppositions.
 • Les impasses comptent aussi : deux pistes ont échoué avant la bonne, et chacune a appris quelque chose.
 
+Et comme on était lancés, Tourelle fait maintenant mieux que le logiciel d'origine : suivi du visage, clic sur l'image pour viser, positions mémorisées, autofocus, raccourcis clavier globaux, manette Xbox… et les commandes de caméra standard de Windows, pour que Teams ou OBS pilotent la tête eux-mêmes 🎯
+
+Côté qualité : 32 tests unitaires, analyse statique, AddressSanitizer, et un audit de sécurité indépendant avant la première version signée 🔐
+
 Le projet s'appelle Tourelle. Il est open source (MIT), avec le récit technique complet 👉 lien en commentaire.
 
 Projet personnel et indépendant, non affilié à Logitech.

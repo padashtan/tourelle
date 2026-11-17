@@ -42,11 +42,16 @@ jobs:
           # The Frame Server must not need a VC++ redistributable.
           $deps = dumpbin /dependents build\TourelleCamera.dll | Out-String
           if ($deps -match 'VCRUNTIME|MSVCP') { throw "TourelleCamera.dll depends on the VC++ runtime:`n$deps" }
-          # Control Flow Guard on everything that ships.
+          # Control Flow Guard and CET compatibility on everything that ships.
           foreach ($file in 'Tourelle.exe', 'TourelleCamera.dll', 'tourelle-cli.exe') {
-            $headers = dumpbin /headers "build\$file" | Out-String
+            $headers = dumpbin /headers /loadconfig "build\$file" | Out-String
             if ($headers -notmatch 'Control Flow Guard') { throw "$file is not built with /guard:cf" }
+            if ($headers -notmatch 'CET compatible') { throw "$file is not built with /CETCOMPAT" }
           }
+
+      - name: Planted-DLL test (no DLL loaded from the executables' folder)
+        shell: pwsh
+        run: tools\test-planted-dlls.ps1 -BuildDir build
 
       - name: Package (zip)
         shell: pwsh
@@ -131,24 +136,106 @@ jobs:
   sign:
     # Runs once SignPath is configured (see docs/signing.md). The "release"
     # environment must require a reviewer in the repository settings.
+    # Order matters: the camera source DLL is signed first, then embedded in
+    # Tourelle.exe; the executables are signed, then packaged; the setup is signed last.
     if: startsWith(github.ref, 'refs/tags/v') && vars.SIGNPATH_ORGANIZATION_ID != ''
     needs: [build, analyze, sanitizer, lint, tag-check]
     runs-on: windows-2022
     environment: release
+    env:
+      SIGNPATH_ORG: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
+        with:
+          arch: x64
+
+      - name: Build
+        run: |
+          cmake -S native -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DTOURELLE_WERROR=ON
+          cmake --build build --target TourelleCamera
+
+      # 1. Camera source DLL
+      - id: dll
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: to-sign-dll
+          path: build/TourelleCamera.dll
       - uses: signpath/github-action-submit-signing-request@ced31329c0317e779dad2eec2a7c3bb46ea1343e  # v1
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
           project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
           signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
-          github-artifact-id: ${{ needs.build.outputs.artifact-id }}
+          github-artifact-id: ${{ steps.dll.outputs.artifact-id }}
           wait-for-completion: true
-          output-artifact-directory: signed
+          output-artifact-directory: signed-dll
+
+      # 2. Executables, with the signed DLL embedded
+      - name: Build the executables around the signed DLL
+        shell: pwsh
+        run: |
+          if ((Get-AuthenticodeSignature signed-dll\TourelleCamera.dll).Status -ne 'Valid') { throw "DLL not signed" }
+          cmake -S native -B build -DTOURELLE_EMBEDDED_SOURCE="$env:GITHUB_WORKSPACE/signed-dll/TourelleCamera.dll"
+          cmake --build build --target Tourelle tourelle-cli
+          New-Item -ItemType Directory -Force to-sign-exe | Out-Null
+          Copy-Item build\Tourelle.exe, build\tourelle-cli.exe to-sign-exe
+      - id: exe
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: to-sign-exe
+          path: to-sign-exe/
+      - uses: signpath/github-action-submit-signing-request@ced31329c0317e779dad2eec2a7c3bb46ea1343e  # v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.exe.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-exe
+
+      # 3. Packages from the signed executables, then the signed setup
+      - name: Package and build the installer
+        shell: pwsh
+        run: |
+          foreach ($file in 'Tourelle.exe', 'tourelle-cli.exe') {
+            if ((Get-AuthenticodeSignature "signed-exe\$file").Status -ne 'Valid') { throw "$file not signed" }
+          }
+          tools\test-planted-dlls.ps1 -BuildDir signed-exe
+          New-Item -ItemType Directory -Force dist\tourelle | Out-Null
+          Copy-Item signed-exe\Tourelle.exe, signed-exe\tourelle-cli.exe, README.md, LICENSE, CHANGELOG.md dist\tourelle
+          Compress-Archive -Path dist\tourelle\* -DestinationPath dist\tourelle-windows-x64.zip
+          $setup = "$env:RUNNER_TEMP\innosetup-6.7.3.exe"
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_3/innosetup-6.7.3.exe' -OutFile $setup
+          if ((Get-FileHash $setup -Algorithm SHA256).Hash -ne '9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732') { throw "Inno Setup checksum mismatch" }
+          Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$env:RUNNER_TEMP\inno" -Wait
+          & "$env:RUNNER_TEMP\inno\ISCC.exe" /Q "/DAppVersion=$($env:GITHUB_REF_NAME.TrimStart('v'))" /DBinDir=..\signed-exe installer\Tourelle.iss
+          if ($LASTEXITCODE) { throw "ISCC failed" }
+      - id: setup
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: to-sign-setup
+          path: dist/tourelle-setup-*.exe
+      - uses: signpath/github-action-submit-signing-request@ced31329c0317e779dad2eec2a7c3bb46ea1343e  # v1
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG }}
+          signing-policy-slug: ${{ vars.SIGNPATH_POLICY_SLUG }}
+          github-artifact-id: ${{ steps.setup.outputs.artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: signed-setup
+
+      - name: Collect the release files
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release | Out-Null
+          Copy-Item dist\tourelle-windows-x64.zip, signed-setup\*.exe release
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: tourelle-windows-x64-signed
-          path: signed/
+          path: release/
 
   release:
     # Publishes the signed files when signing is configured, the unsigned ones otherwise.

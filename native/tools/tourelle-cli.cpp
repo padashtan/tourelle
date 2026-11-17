@@ -133,6 +133,8 @@ int16_t DegreesToUnits(const wchar_t* text) {
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
+    // Media Foundation is delay-loaded: it and its dependencies load from System32 only.
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (argc < 2) return Usage();
     const std::wstring command = argv[1];
     const bool twoArgs = argc == 4;
