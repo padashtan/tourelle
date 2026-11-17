@@ -12,8 +12,12 @@
 #include <stdexcept>
 #include <system_error>
 
+#include "Paths.h"
 #include "TourelleClient.h"
 #include "TourelleProperties.h"
+
+#include <utility>
+#include <vector>
 
 #pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "newdev.lib")
@@ -30,6 +34,9 @@ constexpr wchar_t kWinUsbInterfaceGuid[] = L"{293D3D63-AF2C-42DA-84B9-B9DDC76A7A
 // GUID_DEVCLASS_USBDEVICE: the setup class of the inbox winusb.inf.
 constexpr wchar_t kUsbDeviceClass[] = L"{88BAE032-5A81-49F0-BC3D-A4FF138216D6}";
 constexpr wchar_t kDllName[] = L"TourelleCamera.dll";
+constexpr int kEmbeddedSourceResource = 2;  // RCDATA in Tourelle.rc
+// SYSTEM, Administrators, LocalService (Frame Server): full access; nobody else.
+constexpr wchar_t kDeviceSecurity[] = L"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GA;;;LS)";
 
 [[noreturn]] void Fail(const char* what, DWORD error = GetLastError()) {
     throw std::system_error(static_cast<int>(error), std::system_category(), what);
@@ -58,6 +65,23 @@ std::wstring FindVideoFunction(bool presentOnly) {
     }
     SetupDiDestroyDeviceInfoList(set);
     return result;
+}
+
+// Instance ids of every node of the camera's video function, present or not.
+std::vector<std::wstring> VideoFunctions() {
+    std::vector<std::wstring> ids;
+    HDEVINFO set = SetupDiGetClassDevsW(nullptr, L"USB", nullptr, DIGCF_ALLCLASSES);
+    if (set == INVALID_HANDLE_VALUE) return ids;
+    SP_DEVINFO_DATA data{sizeof(data)};
+    for (DWORD i = 0; SetupDiEnumDeviceInfo(set, i, &data); ++i) {
+        wchar_t id[MAX_DEVICE_ID_LEN];
+        if (SetupDiGetDeviceInstanceIdW(set, &data, id, ARRAYSIZE(id), nullptr) &&
+            _wcsnicmp(id, kVideoFunctionPrefix, wcslen(kVideoFunctionPrefix)) == 0) {
+            ids.emplace_back(id);
+        }
+    }
+    SetupDiDestroyDeviceInfoList(set);
+    return ids;
 }
 
 std::wstring DevNodeProperty(const std::wstring& id, ULONG property) {
@@ -150,6 +174,23 @@ void SetInterfaceGuid(const std::wstring& id) {
     if (status != ERROR_SUCCESS) Fail("RegSetValueEx(DeviceInterfaceGUIDs)", static_cast<DWORD>(status));
 }
 
+// True when the node carries Tourelle's WinUSB interface GUID (set by SetInterfaceGuid).
+bool HasTourelleInterface(const std::wstring& id) {
+    Device device(id);
+    HKEY key = SetupDiOpenDevRegKey(device.Set(), device.Data(), DICS_FLAG_GLOBAL, 0, DIREG_DEV, KEY_QUERY_VALUE);
+    if (key == INVALID_HANDLE_VALUE) return false;
+    wchar_t value[512]{};
+    DWORD size = sizeof(value) - sizeof(wchar_t);  // keep a terminator
+    const bool read = RegGetValueW(key, nullptr, L"DeviceInterfaceGUIDs", RRF_RT_REG_MULTI_SZ, nullptr, value,
+                                   &size) == ERROR_SUCCESS;
+    RegCloseKey(key);
+    if (!read) return false;
+    for (const wchar_t* entry = value; *entry; entry += wcslen(entry) + 1) {
+        if (_wcsicmp(entry, kWinUsbInterfaceGuid) == 0) return true;
+    }
+    return false;
+}
+
 void RestartDevice(const std::wstring& id) {
     Device device(id);
     SP_PROPCHANGE_PARAMS change{};
@@ -204,22 +245,6 @@ std::wstring RegisteredDllPath() {
     return path;
 }
 
-// True when both paths name the same existing file (compares volume and file id,
-// so different spellings of one path match).
-bool SameFile(const std::wstring& a, const std::wstring& b) {
-    const auto identify = [](const std::wstring& path, FILE_ID_INFO* id) {
-        HANDLE file = CreateFileW(path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
-                                  OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
-        if (file == INVALID_HANDLE_VALUE) return false;
-        const bool ok = GetFileInformationByHandleEx(file, FileIdInfo, id, sizeof(*id)) != FALSE;
-        CloseHandle(file);
-        return ok;
-    };
-    FILE_ID_INFO first{}, second{};
-    return identify(a, &first) && identify(b, &second) && first.VolumeSerialNumber == second.VolumeSerialNumber &&
-           memcmp(&first.FileId, &second.FileId, sizeof(first.FileId)) == 0;
-}
-
 // Deletes a file now, or at the next reboot if a process still has it loaded.
 void DeleteOrSchedule(const std::wstring& path) {
     if (DeleteFileW(path.c_str()) || GetLastError() == ERROR_FILE_NOT_FOUND) return;
@@ -237,22 +262,73 @@ void SetRegistryString(HKEY key, const wchar_t* name, const std::wstring& value)
     if (status != ERROR_SUCCESS) Fail("RegSetValueEx", static_cast<DWORD>(status));
 }
 
-void InstallSource(const std::wstring& sourceDll) {
-    if (GetFileAttributesW(sourceDll.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        throw std::runtime_error("TourelleCamera.dll must be next to Tourelle.exe.");
+// The camera source is embedded in Tourelle.exe (RCDATA resource): the elevated
+// process writes it from its own image, never from a file next to it that the user,
+// or anything running as the user, could have swapped (DLL planting).
+std::pair<const void*, DWORD> EmbeddedSource() {
+    HRSRC resource = FindResourceW(nullptr, MAKEINTRESOURCEW(kEmbeddedSourceResource), MAKEINTRESOURCEW(10));  // RT_RCDATA
+    HGLOBAL loaded = resource ? LoadResource(nullptr, resource) : nullptr;
+    const void* data = loaded ? LockResource(loaded) : nullptr;
+    const DWORD size = resource ? SizeofResource(nullptr, resource) : 0;
+    if (!data || size == 0) throw std::runtime_error("The camera source is missing from Tourelle.exe.");
+    return {data, size};
+}
+
+std::wstring FullPath(const std::wstring& path) {
+    wchar_t full[MAX_PATH];
+    const DWORD length = GetFullPathNameW(path.c_str(), MAX_PATH, full, nullptr);
+    return length == 0 || length >= MAX_PATH ? std::wstring() : std::wstring(full);
+}
+
+// True when path is a file inside directory (after normalizing "..", ".", separators).
+bool IsInside(const std::wstring& path, const std::wstring& directory) {
+    return core::IsPathInside(FullPath(path), FullPath(directory));
+}
+
+// Writes data to target through a temporary file in the same (administrator-only)
+// folder, so a failure never leaves a half-written or missing DLL behind.
+void WriteFileReplacing(const std::wstring& target, const void* data, DWORD size) {
+    const std::wstring temporary = target + L".new";
+    HANDLE file = CreateFileW(temporary.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) Fail("CreateFile(TourelleCamera.dll.new)");
+    DWORD written = 0;
+    const bool ok = WriteFile(file, data, size, &written, nullptr) && written == size && FlushFileBuffers(file);
+    const DWORD writeError = GetLastError();
+    CloseHandle(file);
+    if (!ok) {
+        DeleteFileW(temporary.c_str());
+        Fail("WriteFile(TourelleCamera.dll.new)", writeError);
     }
+    if (MoveFileExW(temporary.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return;
+
+    const DWORD error = GetLastError();
+    if (error != ERROR_SHARING_VIOLATION && error != ERROR_ACCESS_DENIED) {
+        DeleteFileW(temporary.c_str());
+        Fail("MoveFileEx(TourelleCamera.dll)", error);
+    }
+    // The Frame Server still has the previous version loaded. A loaded DLL can be
+    // renamed: park it (deleted at the next reboot), then move the new one in.
+    const std::wstring parked = target + L".old." + std::to_wstring(GetTickCount64());
+    if (!MoveFileExW(target.c_str(), parked.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        const DWORD parkError = GetLastError();
+        DeleteFileW(temporary.c_str());
+        Fail("MoveFileEx(park TourelleCamera.dll)", parkError);
+    }
+    MoveFileExW(parked.c_str(), nullptr, MOVEFILE_DELAY_UNTIL_REBOOT);
+    if (!MoveFileExW(temporary.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING)) {
+        const DWORD moveError = GetLastError();
+        MoveFileExW(parked.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING);  // put the old one back
+        DeleteFileW(temporary.c_str());
+        Fail("MoveFileEx(TourelleCamera.dll)", moveError);
+    }
+}
+
+void InstallSource() {
+    const auto [data, size] = EmbeddedSource();
     const std::wstring directory = InstallDirectory();
     CreateDirectoryW(directory.c_str(), nullptr);
     const std::wstring target = directory + L"\\" + kDllName;
-    if (SameFile(sourceDll, target)) {
-        // Installed by the setup program: the DLL is already in place. Copying a file
-        // onto itself fails, and the fallback below would delete it.
-    } else if (!CopyFileW(sourceDll.c_str(), target.c_str(), FALSE)) {
-        // The Frame Server still has the previous version loaded: a loaded DLL
-        // can be renamed, so park it and copy the new one in its place.
-        DeleteOrSchedule(target);
-        if (!CopyFileW(sourceDll.c_str(), target.c_str(), FALSE)) Fail("CopyFile(TourelleCamera.dll)");
-    }
+    WriteFileReplacing(target, data, size);
 
     HKEY key = nullptr;
     const std::wstring server = ClassKey() + L"\\InprocServer32";
@@ -267,11 +343,25 @@ void InstallSource(const std::wstring& sourceDll) {
 }
 
 void RemoveSource() {
-    const std::wstring dll = RegisteredDllPath();
     RegDeleteTreeW(HKEY_LOCAL_MACHINE, ClassKey().c_str());
+    // Only ever delete our own file: never a path read from the registry.
     const std::wstring directory = InstallDirectory();
-    DeleteOrSchedule(dll.empty() ? directory + L"\\" + kDllName : dll);
-    RemoveDirectoryW(directory.c_str());  // fails harmlessly while a parked file waits for reboot
+    DeleteOrSchedule(directory + L"\\" + kDllName);
+    DeleteFileW((directory + L"\\" + kDllName + L".new").c_str());
+    RemoveDirectoryW(directory.c_str());  // fails harmlessly while files remain or wait for reboot
+}
+
+// Only SYSTEM, administrators and LocalService (the Frame Server's account) may open
+// the WinUSB-bound camera: apps go through the virtual camera and the Windows camera
+// privacy settings, not around them.
+void RestrictDeviceAccess(const std::wstring& id) {
+    Device device(id);
+    const std::wstring sddl = kDeviceSecurity;
+    if (!SetupDiSetDeviceRegistryPropertyW(device.Set(), device.Data(), SPDRP_SECURITY_SDS,
+                                           reinterpret_cast<const BYTE*>(sddl.c_str()),
+                                           static_cast<DWORD>((sddl.size() + 1) * sizeof(wchar_t)))) {
+        Fail("SetupDiSetDeviceRegistryProperty(SPDRP_SECURITY_SDS)");
+    }
 }
 
 }  // namespace
@@ -300,7 +390,8 @@ std::wstring Describe() {
         line(L"  class", DevNodeProperty(id, CM_DRP_CLASSGUID));
     }
     const std::wstring dll = RegisteredDllPath();
-    line(L"Camera source", dll);
+    // Never print a path outside Program Files: it could name a user profile.
+    line(L"Camera source", dll.empty() ? L"" : IsInside(dll, InstallDirectory()) ? dll : L"<outside Program Files>");
     if (!dll.empty()) {
         WIN32_FILE_ATTRIBUTE_DATA data{};
         if (GetFileAttributesExW(dll.c_str(), GetFileExInfoStandard, &data)) {
@@ -334,32 +425,50 @@ std::wstring Describe() {
     return text;
 }
 
-void InstallElevated(const std::wstring& sourceDll, bool requireCamera) {
-    InstallSource(sourceDll);
+void InstallElevated(bool requireCamera) {
+    InstallSource();
 
     const std::wstring id = FindVideoFunction(true);
     if (id.empty()) {
         if (!requireCamera) return;
         throw std::runtime_error("Camera not connected (USB 046D:0994).");
     }
-    if (!IsWinUsb(id)) {
-        const std::wstring originalClass = DevNodeProperty(id, CM_DRP_CLASSGUID);
-        SetClassGuid(id, kUsbDeviceClass);
-        try {
+    const bool switching = !IsWinUsb(id);
+    const std::wstring originalClass = DevNodeProperty(id, CM_DRP_CLASSGUID);
+    try {
+        if (switching) {
+            SetClassGuid(id, kUsbDeviceClass);
             InstallWinUsbDriver(id);
-        } catch (...) {
-            if (!originalClass.empty()) SetClassGuid(id, originalClass);
-            throw;
         }
+        SetInterfaceGuid(id);
+        RestrictDeviceAccess(id);
+        RestartDevice(id);
+    } catch (...) {
+        if (switching) {
+            // Give the camera back to Windows: restore its class, or when that is not
+            // possible, remove the device node so the rescan reinstalls usbvideo.sys.
+            try {
+                if (originalClass.empty()) throw std::runtime_error("original class unknown");
+                SetClassGuid(id, originalClass);
+                RemoveAndRescan(id);
+            } catch (...) {
+                try {
+                    RemoveAndRescan(id);
+                } catch (...) {
+                }
+            }
+        }
+        throw;
     }
-    SetInterfaceGuid(id);
-    RestartDevice(id);
 }
 
 void UninstallElevated() {
-    // The camera may be unplugged: a phantom device node keeps WinUSB for next time.
-    const std::wstring id = FindVideoFunction(false);
-    if (!id.empty() && IsWinUsb(id)) RemoveAndRescan(id);
+    // Every node of the camera's video function, plugged in or not (a phantom node
+    // keeps its driver for next time). Only nodes Tourelle bound are touched: a
+    // WinUSB binding made by another tool (without our interface GUID) is left alone.
+    for (const std::wstring& id : VideoFunctions()) {
+        if (IsWinUsb(id) && HasTourelleInterface(id)) RemoveAndRescan(id);
+    }
     RemoveSource();
 }
 

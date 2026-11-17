@@ -33,6 +33,27 @@ All notable changes to Tourelle. Versions follow [Semantic Versioning](https://s
 - The camera reopens by itself after it is unplugged and plugged back in.
 - Demo mode no longer writes to the user's settings.
 
+### Security
+These fixes follow an independent security review and an adversarial code review done before the
+first signed release.
+- The camera source DLL is embedded in Tourelle.exe. The elevated setup writes it from there, never
+  from a file next to the executable, which closes DLL planting and swap attacks.
+- Tourelle.exe and tourelle-cli.exe load their DLLs from System32 only (`/DEPENDENTLOADFLAG`,
+  `SetDefaultDllDirectories`).
+- Only SYSTEM, administrators and the Frame Server's account (LocalService) can open the
+  WinUSB-bound camera. Apps go through the virtual camera and the Windows camera privacy settings.
+  The camera is also checked by its USB id before use.
+- Video payload headers are validated against the UVC rules (PTS/SCR sizes, 12-byte maximum). An
+  error no longer spills onto the next frame. Packet bounds are checked without integer wrap-around.
+- The media source keeps itself alive across the wake callback (use-after-free race). Short or
+  inconsistent replies from the device are handled.
+- The motor queue cannot be flooded: recenters and absolute moves supersede pending moves.
+- Uninstall only deletes files inside `Program Files\Tourelle` and only removes WinUSB bindings that
+  Tourelle made. A failed driver switch always gives the camera back to Windows.
+- Control Flow Guard and CET compatibility on every binary. The CI actions are pinned to commit SHAs
+  and Inno Setup is verified by SHA-256. Signing runs only for tags on `main`, behind a protected
+  environment.
+
 ## 0.2.0
 
 - Tourelle.exe: dark interface, live preview, notification area icon, start with Windows, inverted

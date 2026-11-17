@@ -86,6 +86,46 @@ TEST(assembler_rejects_bad_headers) {
     EXPECT(out.frames.empty());
 }
 
+TEST(assembler_header_length_must_match_pts_scr) {
+    Collector out;
+    FrameAssembler a;
+    a.Reset(0, 1024, out.Sink());
+    // PTS + SCR declared (needs 12 header bytes) but bHeaderLength is 2: rejected,
+    // and the frame it belongs to is dropped instead of carrying header bytes as data.
+    const std::vector<uint8_t> lying{2, 0x0E, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    a.OnPayload(lying.data(), lying.size());
+    Feed(a, Payload(0x00, {7}));
+    Feed(a, Payload(0x01, {8}));  // FID toggles: the poisoned frame ends
+    EXPECT_EQ(a.Dropped(), 1u);
+    // A correct PTS+SCR header (12 bytes) is accepted.
+    std::vector<uint8_t> good{12, 0x0F, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 42};
+    a.OnPayload(good.data(), good.size());
+    EXPECT_EQ(out.frames.size(), 1u);
+    if (!out.frames.empty()) EXPECT(out.frames.back() == std::vector<uint8_t>({8, 42}));
+}
+
+TEST(assembler_rejects_oversized_header) {
+    Collector out;
+    FrameAssembler a;
+    a.Reset(0, 1024, out.Sink());
+    std::vector<uint8_t> big(60, 0);
+    big[0] = 50;  // bHeaderLength above the UVC maximum of 12
+    big[1] = 0x02;
+    a.OnPayload(big.data(), big.size());
+    EXPECT(out.frames.empty());
+}
+
+TEST(assembler_error_does_not_spill_onto_next_frame) {
+    Collector out;
+    FrameAssembler a;
+    a.Reset(0, 4, out.Sink());
+    Feed(a, Payload(0x00, {1, 2, 3, 4, 5}));  // oversize: frame 0 is bad, nothing stored
+    Feed(a, Payload(0x01, {9}));              // FID toggles: frame 1 starts clean
+    Feed(a, Payload(0x03, {9}));              // EOF
+    EXPECT_EQ(out.frames.size(), 1u);
+    EXPECT_EQ(a.Dropped(), 1u);
+}
+
 TEST(assembler_mark_error) {
     Collector out;
     FrameAssembler a;

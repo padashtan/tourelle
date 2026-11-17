@@ -48,8 +48,8 @@ Name: "es"; MessagesFile: "compiler:Languages\Spanish.isl"
 Name: "pl"; MessagesFile: "compiler:Languages\Polish.isl"
 
 [Files]
+; TourelleCamera.dll is embedded in Tourelle.exe: "Tourelle.exe --install-quiet" writes it.
 Source: "{#BinDir}\Tourelle.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#BinDir}\TourelleCamera.dll"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
 Source: "{#BinDir}\tourelle-cli.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
@@ -63,9 +63,6 @@ Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: 
 Root: HKCU; Subkey: "Software\Tourelle"; ValueType: none; Flags: uninsdeletekey
 
 [Run]
-; Registers the camera source; switches the camera's driver if it is plugged in
-; (otherwise Tourelle.exe offers it later).
-Filename: "{app}\Tourelle.exe"; Parameters: "--install-quiet"; StatusMsg: "Tourelle…"; Flags: runhidden waituntilterminated
 Filename: "{app}\Tourelle.exe"; Description: "{cm:LaunchProgram,Tourelle}"; Flags: nowait postinstall skipifsilent runasoriginaluser
 
 [Code]
@@ -84,6 +81,22 @@ function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   StopFrameServer();
   Result := '';
+end;
+
+// Installs the camera source (written from the copy embedded in Tourelle.exe) and
+// switches the camera's driver when it is plugged in; otherwise Tourelle.exe offers
+// that later. A failure is reported instead of looking like a success.
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    if not Exec(ExpandConstant('{app}\Tourelle.exe'), '--install-quiet', '', SW_HIDE, ewWaitUntilTerminated, ResultCode)
+       or (ResultCode <> 0) then
+      SuppressibleMsgBox('Tourelle could not install its camera source (code ' + IntToStr(ResultCode) +
+        '). Open Tourelle and click Install to retry.', mbError, MB_OK, IDOK);
+  end;
 end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

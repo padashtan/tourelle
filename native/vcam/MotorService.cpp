@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <iterator>
 #include <system_error>
 #include <thread>
 
@@ -78,12 +79,29 @@ int MotorService::Focus() {
 
 void MotorService::Enqueue(const Command& command) {
     std::lock_guard guard(lock_);
-    // Merge consecutive relative moves: key auto-repeat must not pile up.
-    if (command.kind == Command::Kind::Relative && !queue_.empty() && queue_.back().kind == Command::Kind::Relative) {
-        queue_.back().value.pan = core::ClampPan(queue_.back().value.pan + command.value.pan) ;
-        queue_.back().value.tilt = core::ClampTilt(queue_.back().value.tilt + command.value.tilt);
-    } else if (queue_.size() < kMaxQueue) {
-        queue_.push_back(command);
+    // Keep the queue short whatever a client sends: a recenter or an absolute move
+    // supersedes the moves still waiting, relative moves merge, focus keeps the last.
+    using Kind = Command::Kind;
+    const auto isMove = [](const Command& c) { return c.kind != Kind::Focus; };
+    switch (command.kind) {
+        case Kind::Reset:
+        case Kind::Absolute:
+            queue_.erase(std::remove_if(queue_.begin(), queue_.end(), isMove), queue_.end());
+            queue_.push_back(command);
+            break;
+        case Kind::Relative:
+            if (!queue_.empty() && queue_.back().kind == Kind::Relative) {
+                queue_.back().value.pan = core::ClampPan(queue_.back().value.pan + command.value.pan);
+                queue_.back().value.tilt = core::ClampTilt(queue_.back().value.tilt + command.value.tilt);
+            } else if (queue_.size() < kMaxQueue) {
+                queue_.push_back(command);
+            }
+            break;
+        case Kind::Focus:
+            queue_.erase(std::remove_if(queue_.begin(), queue_.end(), [](const Command& c) { return c.kind == Kind::Focus; }),
+                         queue_.end());
+            queue_.push_back(command);
+            break;
     }
     if (!threadRunning_) {
         // The thread holds a reference on this DLL so COM cannot unload it mid-command;
@@ -126,34 +144,41 @@ void MotorService::Loop() {
 
 void MotorService::Execute(const Command& command) {
     bool recentered = false;
+    // The tracker is updated under lock_, the USB transfer happens outside it: a slow
+    // device must not block position and focus queries from other clients.
     HRESULT hr = CameraHub::Get().With([&](UvcDevice& camera) {
-        std::lock_guard guard(lock_);
-        switch (command.kind) {
-            case Command::Kind::Relative: {
-                const core::PanTilt delta = tracker_.Relative(command.value);
-                if (delta.pan || delta.tilt) {
-                    camera.PanTiltRelative(core::ToMotorValue(delta.pan), core::ToMotorValue(delta.tilt));
-                }
-                break;
-            }
-            case Command::Kind::Absolute:
-                if (tracker_.Known()) {
-                    const core::PanTilt delta = tracker_.MoveTo(command.value);
-                    if (delta.pan || delta.tilt) {
-                        camera.PanTiltRelative(core::ToMotorValue(delta.pan), core::ToMotorValue(delta.tilt));
+        core::PanTilt delta{};
+        bool recenter = false;
+        int focus = -1;
+        {
+            std::lock_guard guard(lock_);
+            switch (command.kind) {
+                case Command::Kind::Relative:
+                    delta = tracker_.Relative(command.value);
+                    break;
+                case Command::Kind::Absolute:
+                    if (tracker_.Known()) {
+                        delta = tracker_.MoveTo(command.value);
+                    } else {
+                        recenter = true;  // unknown position: recenter first, then move
                     }
                     break;
-                }
-                [[fallthrough]];  // unknown position: recenter first, then move
-            case Command::Kind::Reset:
-                camera.PanTiltReset();
-                tracker_.Recentered();
-                recentered = true;
-                break;
-            case Command::Kind::Focus:
-                focus_ = std::clamp(command.focus, core::kFocusMin, core::kFocusMax);
-                camera.SetFocus(static_cast<uint8_t>(focus_));
-                break;
+                case Command::Kind::Reset:
+                    recenter = true;
+                    break;
+                case Command::Kind::Focus:
+                    focus = focus_ = std::clamp(command.focus, core::kFocusMin, core::kFocusMax);
+                    break;
+            }
+            if (recenter) tracker_.Recentered();
+        }
+        if (recenter) {
+            camera.PanTiltReset();
+            recentered = true;
+        } else if (delta.pan || delta.tilt) {
+            camera.PanTiltRelative(core::ToMotorValue(delta.pan), core::ToMotorValue(delta.tilt));
+        } else if (focus >= 0) {
+            camera.SetFocus(static_cast<uint8_t>(focus));
         }
     });
     if (FAILED(hr)) {

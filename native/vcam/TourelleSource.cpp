@@ -447,7 +447,7 @@ HRESULT TourelleSource::ProcAmpProperty(ULONG id, ULONG flags, void* data, ULONG
             range.step = std::max<LONG>(1, Decode(camera.GetControl(kGetRes, unit, control->selector, control->size),
                                                   *control));
             range.defaultValue = Decode(camera.GetControl(kGetDef, unit, control->selector, control->size), *control);
-            range.supportsAuto = hasAuto;
+            if (range.minimum > range.maximum) return;  // nonsense from the device: treat as unsupported
             it = procAmpRanges_.emplace(id, range).first;
         }
         const core::LongRange& range = it->second;
@@ -459,7 +459,10 @@ HRESULT TourelleSource::ProcAmpProperty(ULONG id, ULONG flags, void* data, ULONG
             case core::KsOperation::Get: {
                 const LONG amount = Decode(camera.GetControl(kGetCur, unit, control->selector, control->size), *control);
                 bool automatic = false;
-                if (hasAuto) automatic = camera.GetControl(kGetCur, unit, control->autoSelector, 1)[0] != 0;
+                if (hasAuto) {
+                    const auto mode = camera.GetControl(kGetCur, unit, control->autoSelector, 1);
+                    automatic = !mode.empty() && mode[0] != 0;  // the device may answer with fewer bytes
+                }
                 result = core::WriteControlValue(
                     data, length, amount,
                     automatic ? KSPROPERTY_VIDEOPROCAMP_FLAGS_AUTO : KSPROPERTY_VIDEOPROCAMP_FLAGS_MANUAL,
@@ -476,7 +479,7 @@ HRESULT TourelleSource::ProcAmpProperty(ULONG id, ULONG flags, void* data, ULONG
                 result = S_OK;
                 break;
             }
-            default:
+            case core::KsOperation::Unsupported:  // rejected before reaching the camera
                 break;
         }
     });

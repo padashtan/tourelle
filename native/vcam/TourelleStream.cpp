@@ -61,19 +61,6 @@ HRESULT TourelleStream::CreateMediaType(REFGUID subtype, const VideoMode& mode, 
     return S_OK;
 }
 
-TourelleStream::VideoMode TourelleStream::SelectedMode() {
-    ComPtr<IMFMediaTypeHandler> handler;
-    ComPtr<IMFMediaType> type;
-    UINT32 width = 0, height = 0;
-    if (SUCCEEDED(descriptor_->GetMediaTypeHandler(&handler)) && SUCCEEDED(handler->GetCurrentMediaType(&type)) &&
-        SUCCEEDED(MFGetAttributeSize(type.Get(), MF_MT_FRAME_SIZE, &width, &height))) {
-        for (const VideoMode& mode : kModes) {
-            if (mode.width == width && mode.height == height) return mode;
-        }
-    }
-    return kModes[0];
-}
-
 // IMFMediaEventGenerator ------------------------------------------------------
 
 IFACEMETHODIMP TourelleStream::GetEvent(DWORD flags, IMFMediaEvent** event) {
@@ -120,6 +107,7 @@ IFACEMETHODIMP TourelleStream::GetStreamDescriptor(IMFStreamDescriptor** descrip
 
 IFACEMETHODIMP TourelleStream::RequestSample(IUnknown* token) {
     std::function<void()> wake;
+    ComPtr<IMFMediaSource> keepAlive;  // the wake handler calls into the source
     {
         std::lock_guard guard(lock_);
         if (shutdown_) return MF_E_SHUTDOWN;
@@ -127,8 +115,9 @@ IFACEMETHODIMP TourelleStream::RequestSample(IUnknown* token) {
         tokens_.emplace_back(token);  // answered by the next camera frame
         lastRequest_ = GetTickCount64();
         wake = wake_;
+        keepAlive = source_;  // holds the source across the call below, even if it is released meanwhile
     }
-    if (wake) wake();  // reopens the camera if the source stopped it while idle
+    if (wake && keepAlive) wake();  // reopens the camera if the source stopped it while idle
     return S_OK;
 }
 
@@ -268,7 +257,11 @@ HRESULT TourelleStream::FillSample(const BYTE* yuy2, IMFSample* sample) {
             return E_UNEXPECTED;
         }
         for (UINT32 y = 0; y < height; ++y) memcpy(scanline0 + static_cast<ptrdiff_t>(y) * pitch, yuy2 + y * srcStride, srcStride);
-    } else if (pitch >= static_cast<LONG>(width) && length >= static_cast<DWORD>(pitch) * height * 3 / 2) {
+    } else {
+        if (pitch < static_cast<LONG>(width) || length < static_cast<DWORD>(pitch) * height * 3 / 2) {
+            buffer2d->Unlock2D();
+            return E_UNEXPECTED;  // never deliver an unfilled sample
+        }
         core::Yuy2ToNv12(yuy2, width, height, scanline0, pitch);
     }
     buffer2d->Unlock2D();

@@ -24,7 +24,6 @@ using Guid = std::array<uint8_t, 16>;  // byte order as in the descriptor
 struct ExtensionUnit {
     uint8_t id = 0;
     Guid guid{};
-    uint8_t numControls = 0;
     bool hidden = false;  // declared in a vendor (0x41) descriptor that class drivers ignore
 };
 

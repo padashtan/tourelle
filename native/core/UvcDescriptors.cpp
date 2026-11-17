@@ -24,7 +24,6 @@ ExtensionUnit ReadUnit(const uint8_t* p, bool hidden) {
     ExtensionUnit unit;
     unit.id = p[3];
     std::memcpy(unit.guid.data(), p + 4, unit.guid.size());
-    unit.numControls = p[20];
     unit.hidden = hidden;
     return unit;
 }

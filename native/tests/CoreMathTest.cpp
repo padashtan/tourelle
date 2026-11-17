@@ -21,6 +21,21 @@ TEST(yuy2_to_nv12_values) {
     EXPECT_EQ(nv12[5], 205);  // V averaged
 }
 
+TEST(yuy2_to_nv12_respects_pitch) {
+    // 4x2 image into a pitch of 8: bytes past the width must stay untouched.
+    const uint8_t yuy2[16] = {1, 50, 2, 60, 3, 70, 4, 80, 5, 50, 6, 60, 7, 70, 8, 80};
+    uint8_t nv12[8 * 3];
+    for (auto& b : nv12) b = 0xEE;
+    Yuy2ToNv12(yuy2, 4, 2, nv12, 8);
+    EXPECT_EQ(nv12[0], 1);
+    EXPECT_EQ(nv12[3], 4);
+    EXPECT_EQ(nv12[4], 0xEE);  // padding of row 0
+    EXPECT_EQ(nv12[8], 5);
+    EXPECT_EQ(nv12[16], 50);   // U of the first 2x2 block
+    EXPECT_EQ(nv12[17], 60);   // V
+    EXPECT_EQ(nv12[20], 0xEE); // padding of the UV row
+}
+
 TEST(sharpness_flat_vs_texture) {
     const uint32_t w = 30, h = 30;
     std::vector<uint8_t> flat(w * h * 2, 128), checker(w * h * 2, 0);

@@ -20,10 +20,18 @@ publisher of record.
 3. Add these repository secrets: `SIGNPATH_API_TOKEN`, `SIGNPATH_ORGANIZATION_ID`.
 4. Add these repository variables: `SIGNPATH_PROJECT_SLUG`, `SIGNPATH_POLICY_SLUG`.
 
-The `sign` job in `.github/workflows/build.yml` runs only when `SIGNPATH_ORGANIZATION_ID` is set. It
-publishes the signed files as the `tourelle-windows-x64-signed` artifact. Once the first signed build
-succeeds, make the `release` job depend on `sign` and download that artifact instead of the unsigned
-one.
+The `sign` job in `.github/workflows/build.yml` runs only when `SIGNPATH_ORGANIZATION_ID` is set.
+Once it is set, the `release` job publishes only the signed files.
+
+Protect what feeds the signer:
+
+5. In *Settings > Environments*, create the `release` environment and add yourself as a required
+   reviewer. The `sign` and `release` jobs wait for that approval.
+6. In *Settings > Rules*, add a tag ruleset for `v*`: only maintainers can create these tags, and
+   nobody can update or delete them. The `tag-check` job also refuses a tag whose commit is not on
+   `main`.
+7. Third-party actions are pinned to commit SHAs, and Inno Setup is pinned to a version and a
+   SHA-256. Update the pins on purpose, never automatically.
 
 ## Option 2: Azure Trusted Signing (paid, about 10 USD per month)
 

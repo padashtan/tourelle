@@ -14,12 +14,20 @@ void FrameAssembler::Reset(size_t expectedSize, size_t maxSize, Sink sink) {
 
 void FrameAssembler::OnPayload(const uint8_t* data, size_t size) {
     if (!data || size < 2) return;
+    // UVC payload header: bHeaderLength, bmHeaderInfo (bit 0 FID, 1 EOF, 2 PTS, 3 SCR,
+    // 6 ERR), then 4 bytes of PTS and 6 of SCR when their bits are set: 12 bytes at most.
     const uint8_t headerLength = data[0];
-    if (headerLength < 2 || headerLength > size) return;  // not a valid payload header
     const uint8_t info = data[1];
+    const size_t required = 2 + ((info & 0x04) ? 4 : 0) + ((info & 0x08) ? 6 : 0);
+    if (headerLength < required || headerLength > kMaxHeaderLength || headerLength > size) {
+        error_ = true;  // corrupt packet: the frame it belongs to is not trustworthy
+        return;
+    }
     const bool fid = (info & 0x01) != 0;
 
-    if (haveFid_ && fid != lastFid_ && !frame_.empty()) Emit();  // new frame began without EOF
+    // A new frame began without EOF: close the previous one, even if only an error
+    // was recorded for it (otherwise that error would spill onto the new frame).
+    if (haveFid_ && fid != lastFid_ && (!frame_.empty() || error_)) Emit();
     haveFid_ = true;
     lastFid_ = fid;
     if (info & 0x40) error_ = true;

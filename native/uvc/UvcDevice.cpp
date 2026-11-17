@@ -1,6 +1,8 @@
 #include "UvcDevice.h"
 
 #include <cfgmgr32.h>
+#include <initguid.h>  // define DEVPKEY_Device_InstanceId in this file
+#include <devpkey.h>
 
 #include <algorithm>
 #include <stdexcept>
@@ -30,6 +32,7 @@ constexpr int kTransfers = 4;
 // Consecutive failed submissions before the device is considered gone.
 constexpr int kMaxSubmitFailures = 200;
 constexpr size_t kMaxMjpegFrame = 4u << 20;
+constexpr ULONG kControlTimeoutMs = 1000;
 
 [[noreturn]] void ThrowLastError(const char* what) {
     throw std::system_error(static_cast<int>(GetLastError()), std::system_category(), what);
@@ -44,6 +47,21 @@ bool DeviceGone(DWORD error) {
            error == ERROR_INVALID_HANDLE || error == ERROR_NO_SUCH_DEVICE;
 }
 
+// The interface GUID alone proves nothing: any USB device can declare it through
+// Microsoft OS descriptors. Only the camera's video function is accepted.
+bool IsCameraInterface(const wchar_t* path) {
+    wchar_t instance[MAX_DEVICE_ID_LEN]{};
+    ULONG size = sizeof(instance) - sizeof(wchar_t);
+    DEVPROPTYPE type = 0;
+    if (CM_Get_Device_Interface_PropertyW(path, &DEVPKEY_Device_InstanceId, &type, reinterpret_cast<PBYTE>(instance),
+                                          &size, 0) != CR_SUCCESS ||
+        type != DEVPROP_TYPE_STRING) {
+        return false;
+    }
+    constexpr wchar_t kPrefix[] = L"USB\\VID_046D&PID_0994&MI_00\\";
+    return _wcsnicmp(instance, kPrefix, ARRAYSIZE(kPrefix) - 1) == 0;
+}
+
 std::wstring FirstInterfacePath() {
     GUID guid = kWinUsbInterfaceGuid;
     ULONG length = 0;
@@ -56,7 +74,11 @@ std::wstring FirstInterfacePath() {
         CR_SUCCESS) {
         throw std::runtime_error("CM_Get_Device_Interface_List failed");
     }
-    return std::wstring(list.c_str());  // first entry of the multi-string
+    list.back() = L'\0';  // the multi-string must end inside the buffer, whatever the API returned
+    for (const wchar_t* entry = list.c_str(); *entry; entry += wcslen(entry) + 1) {
+        if (IsCameraInterface(entry)) return entry;
+    }
+    throw std::runtime_error("No supported camera bound to WinUSB.");
 }
 
 }  // namespace
@@ -81,6 +103,9 @@ std::unique_ptr<UvcDevice> UvcDevice::Open() {
         throw std::system_error(static_cast<int>(error), std::system_category(), "WinUsb_GetAssociatedInterface");
     }
     std::unique_ptr<UvcDevice> device(new UvcDevice(file, control, stream));
+    // A stalled device must not hold the Frame Server's threads for the default 5 s.
+    ULONG timeout = kControlTimeoutMs;
+    WinUsb_SetPipePolicy(control, 0, PIPE_TRANSFER_TIMEOUT, sizeof(timeout), &timeout);
     device->ReadConfiguration();
     return device;
 }
@@ -203,7 +228,17 @@ void UvcDevice::StreamLoop() {
 
     std::vector<USBD_ISO_PACKET_DESCRIPTOR> packets(kPacketsPerTransfer * kTransfers);
     OVERLAPPED overlapped[kTransfers]{};
-    for (auto& o : overlapped) o.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    for (auto& o : overlapped) {
+        o.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!o.hEvent) {
+            for (auto& created : overlapped) {
+                if (created.hEvent) CloseHandle(created.hEvent);
+            }
+            WinUsb_UnregisterIsochBuffer(isoch);
+            running_ = false;
+            return;
+        }
+    }
 
     auto submit = [&](int slot, bool continueStream) {
         ResetEvent(overlapped[slot].hEvent);
@@ -239,9 +274,16 @@ void UvcDevice::StreamLoop() {
             const uint8_t* base = buffer.data() + static_cast<size_t>(slot) * transferSize;
             for (ULONG k = 0; k < kPacketsPerTransfer; ++k) {
                 const auto& packet = packets[slot * kPacketsPerTransfer + k];
-                if (packet.Status == 0 && packet.Length > 0 && packet.Offset + packet.Length <= transferSize) {
-                    assembler_.OnPayload(base + packet.Offset, packet.Length);
+                if (packet.Status != 0) {
+                    assembler_.MarkError();  // a lost packet leaves a hole in the frame
+                    continue;
                 }
+                // 64-bit sum: Offset + Length must not wrap around.
+                if (packet.Length == 0 ||
+                    static_cast<ULONGLONG>(packet.Offset) + packet.Length > static_cast<ULONGLONG>(transferSize)) {
+                    continue;
+                }
+                assembler_.OnPayload(base + packet.Offset, packet.Length);
             }
             delivered_ = assembler_.Delivered();
             dropped_ = assembler_.Dropped();
@@ -289,11 +331,6 @@ void UvcDevice::SetFocus(uint8_t value) {
     data[0] = value;
     data[5] = 1;  // as the camera reports it (GET_CUR ends with 01)
     Control(kRequestOutInterface, kSetCur, kFocus << 8, static_cast<uint16_t>(motorUnit_ << 8), control_, data);
-}
-
-uint8_t UvcDevice::Focus() {
-    const auto data = GetControl(kGetCur, motorUnit_, kFocus, 6);
-    return data.empty() ? 0 : data[0];
 }
 
 std::vector<uint8_t> UvcDevice::GetControl(uint8_t request, uint8_t unit, uint8_t selector, uint16_t length) {

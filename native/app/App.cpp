@@ -1964,11 +1964,7 @@ int RunAdminTask(bool install, bool quiet) {
     const HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);  // SetupAPI works either way
     try {
         if (install) {
-            wchar_t self[MAX_PATH];
-            GetModuleFileNameW(nullptr, self, MAX_PATH);
-            std::wstring dll = self;
-            dll = dll.substr(0, dll.find_last_of(L'\\') + 1) + L"TourelleCamera.dll";
-            tourelle::setup::InstallElevated(dll, !quiet);
+            tourelle::setup::InstallElevated(!quiet);
         } else {
             tourelle::setup::UninstallElevated();
         }
@@ -1984,6 +1980,9 @@ int RunAdminTask(bool install, bool quiet) {
 }  // namespace
 
 int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In_ int show) {
+    // Load DLLs from System32 only (static imports are covered by /DEPENDENTLOADFLAG):
+    // nothing placed next to Tourelle.exe gets loaded, even when it runs elevated.
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     int result;

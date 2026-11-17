@@ -16,7 +16,6 @@ struct LongRange {
     LONG maximum = 0;
     LONG step = 1;
     LONG defaultValue = 0;
-    bool supportsAuto = false;
 };
 
 // Full BASICSUPPORT answer for a LONG control with one range and one default.

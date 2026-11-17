@@ -31,9 +31,8 @@ inline constexpr GUID kWinUsbInterfaceGuid = {
 
 using FrameFormat = core::FrameFormat;
 
-// UVC request codes.
-inline constexpr uint8_t kGetCur = 0x81, kGetMin = 0x82, kGetMax = 0x83, kGetRes = 0x84, kGetLen = 0x85,
-                         kGetInfo = 0x86, kGetDef = 0x87;
+// UVC request codes used by Tourelle.
+inline constexpr uint8_t kGetCur = 0x81, kGetMin = 0x82, kGetMax = 0x83, kGetRes = 0x84, kGetDef = 0x87;
 
 class UvcDevice {
 public:
@@ -53,7 +52,6 @@ public:
     // Negotiates the format, selects the alternate setting and starts streaming.
     void Start(const FrameFormat& format, uint32_t interval, FrameCallback callback);
     void Stop();
-    bool Streaming() const { return running_; }
     // The stream stopped by itself because the device went away (unplugged).
     bool Lost() const { return lost_; }
 
@@ -62,7 +60,6 @@ public:
     void PanTiltReset(bool pan = true, bool tilt = true);
     // Focus motor target, 0 (far) to 255 (near).
     void SetFocus(uint8_t value);
-    uint8_t Focus();
 
     // Raw class requests to a unit of the video control interface (see kGet*).
     std::vector<uint8_t> GetControl(uint8_t request, uint8_t unit, uint8_t selector, uint16_t length);

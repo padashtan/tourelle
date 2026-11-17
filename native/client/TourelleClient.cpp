@@ -8,6 +8,8 @@
 #include <wrl/client.h>
 
 #include <cwchar>
+#include <cwctype>
+#include <string>
 
 #include "TourelleProperties.h"
 
@@ -43,12 +45,24 @@ HRESULT ForEachCamera(Visit visit) {
     return S_OK;
 }
 
+// Our virtual camera: a software camera (VCAMDEVAPI device) whose name starts with
+// "Tourelle Camera". A physical camera merely containing that text never matches.
 bool IsTourelle(IMFActivate* device) {
     wchar_t* name = nullptr;
+    wchar_t* link = nullptr;
     UINT32 length = 0;
-    if (FAILED(device->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &name, &length)) || !name) return false;
-    const bool match = wcsstr(name, kTourelleCameraName) != nullptr;
+    bool match = false;
+    if (SUCCEEDED(device->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME, &name, &length)) && name &&
+        SUCCEEDED(device->GetAllocatedString(MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK, &link, &length)) &&
+        link) {
+        // Media Foundation may return the link in lower case.
+        std::wstring lowerLink(link);
+        for (auto& c : lowerLink) c = static_cast<wchar_t>(towlower(c));
+        match = _wcsnicmp(name, kTourelleCameraName, wcslen(kTourelleCameraName)) == 0 &&
+                lowerLink.find(L"vcamdevapi") != std::wstring::npos;
+    }
     CoTaskMemFree(name);
+    CoTaskMemFree(link);
     return match;
 }
 

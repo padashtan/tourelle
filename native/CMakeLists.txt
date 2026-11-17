@@ -25,12 +25,19 @@ endif()
 if(TOURELLE_ASAN)
     add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/fsanitize=address> $<$<COMPILE_LANGUAGE:CXX>:/Zi>)
     add_link_options(/INCREMENTAL:NO /DEBUG)
+else()
+    # Exploit mitigations: Control Flow Guard and CET shadow stack compatibility.
+    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/guard:cf>)
+    add_link_options(/guard:cf /CETCOMPAT)
 endif()
+
+# Executables load their static imports from System32 only (no DLL planting next to them).
+set(TOURELLE_SYSTEM32_ONLY /DEPENDENTLOADFLAG:0x800)
 
 # Pure logic, no hardware: descriptor parsing, frame assembly, imaging, motor math, KS helpers.
 add_library(core STATIC
     core/UvcDescriptors.cpp core/FrameAssembler.cpp core/Imaging.cpp core/Motor.cpp core/Autofocus.cpp
-    core/KsControls.cpp core/DemoPattern.cpp)
+    core/KsControls.cpp core/DemoPattern.cpp core/Paths.cpp)
 target_include_directories(core PUBLIC core)
 
 # User-mode UVC driver over WinUSB (video + motors).
@@ -41,7 +48,8 @@ target_link_libraries(uvc PUBLIC core winusb cfgmgr32)
 # Virtual camera media source, loaded by the Windows Camera Frame Server.
 add_library(TourelleCamera SHARED
     vcam/dllmain.cpp vcam/TourelleActivate.cpp vcam/TourelleSource.cpp vcam/TourelleStream.cpp vcam/MotorService.cpp
-    vcam/TourelleCamera.def)
+    vcam/TourelleCamera.def vcam/TourelleCamera.rc)
+target_include_directories(TourelleCamera PRIVATE app)  # Version.h
 target_link_libraries(TourelleCamera PRIVATE uvc mfplat mf mfuuid mfsensorgroup runtimeobject)
 
 # Client side of the virtual camera: registration, lookup, motor commands.
@@ -49,24 +57,33 @@ add_library(client STATIC client/TourelleClient.cpp)
 target_include_directories(client PUBLIC client include)
 target_link_libraries(client PUBLIC mfplat mf mfuuid mfsensorgroup ole32)
 
-# The application: live preview, pan/tilt controls, one-click setup.
-add_executable(Tourelle WIN32 app/App.cpp app/Setup.cpp app/FaceTracker.cpp app/Gamepad.cpp app/Tourelle.rc app/Tourelle.manifest)
+# The application: live preview, pan/tilt controls, one-click setup. The camera
+# source DLL is embedded as a resource: the elevated setup writes it from there.
+set(TOURELLE_EMBED_RC ${CMAKE_CURRENT_BINARY_DIR}/EmbeddedCameraSource.rc)
+file(GENERATE OUTPUT ${TOURELLE_EMBED_RC} CONTENT "2 RCDATA \"$<TARGET_FILE:TourelleCamera>\"\n")
+set_source_files_properties(${TOURELLE_EMBED_RC} PROPERTIES GENERATED TRUE
+                            OBJECT_DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/TourelleCamera.dll)
+add_executable(Tourelle WIN32 app/App.cpp app/Setup.cpp app/FaceTracker.cpp app/Gamepad.cpp app/Tourelle.rc
+               ${TOURELLE_EMBED_RC} app/Tourelle.manifest)
+add_dependencies(Tourelle TourelleCamera)
 target_include_directories(Tourelle PRIVATE app)
 target_link_libraries(Tourelle PRIVATE client core windowsapp advapi32)
-target_link_options(Tourelle PRIVATE /MANIFESTUAC:NO)  # execution level comes from Tourelle.manifest
+target_link_options(Tourelle PRIVATE /MANIFESTUAC:NO ${TOURELLE_SYSTEM32_ONLY})  # UAC level from Tourelle.manifest
 
 add_executable(tourelle-cli tools/tourelle-cli.cpp)
 target_link_libraries(tourelle-cli PRIVATE client)
+target_link_options(tourelle-cli PRIVATE ${TOURELLE_SYSTEM32_ONLY})
 
-# Hardware test bench, without the virtual camera.
+# Hardware test bench, without the virtual camera (developer tool, not shipped).
 add_executable(uvcgrab tools/uvcgrab.cpp)
 target_link_libraries(uvcgrab PRIVATE uvc)
+target_link_options(uvcgrab PRIVATE ${TOURELLE_SYSTEM32_ONLY})
 
 # Unit tests (no hardware needed).
 enable_testing()
 add_executable(tourelle-tests
     tests/TestMain.cpp tests/UvcDescriptorsTest.cpp tests/FrameAssemblerTest.cpp tests/CoreMathTest.cpp
-    tests/KsControlsTest.cpp tests/StringsTest.cpp tests/DemoPatternTest.cpp)
+    tests/KsControlsTest.cpp tests/StringsTest.cpp tests/DemoPatternTest.cpp tests/PathsTest.cpp)
 target_include_directories(tourelle-tests PRIVATE tests app)
 target_link_libraries(tourelle-tests PRIVATE core)
 add_test(NAME unit COMMAND tourelle-tests)

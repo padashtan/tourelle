@@ -27,10 +27,14 @@ native\build\Tourelle.exe --demo         :: the app with a synthetic image (no c
 Hardware checks with the camera connected:
 
 ```bat
-native\build\uvcgrab.exe                 :: stream + move test, without the virtual camera
 native\build\tourelle-cli.exe probe      :: standard controls through the virtual camera
 native\build\tourelle-cli.exe grab 800 600
+native\build\uvcgrab.exe                 :: direct stream + move test, without the virtual camera
 ```
+
+`uvcgrab` opens the camera directly, so run it from an **administrator** prompt. Only SYSTEM,
+administrators and the Frame Server can open the WinUSB-bound camera. Also quit Tourelle first, and
+wait a few seconds for the Frame Server to release the camera.
 
 The installer is built with Inno Setup 6:
 `iscc /DAppVersion=0.3.0 /DBinDir=..\native\build installer\Tourelle.iss`.
@@ -50,7 +54,9 @@ Rules of thumb:
 
 - Logic that can be tested without the camera belongs in `core`, with a test.
 - The camera source runs inside a Windows service and receives requests from any process: validate
-  every size and pointer it gets.
+  every size and pointer it gets. Data from the USB device is untrusted too.
+- The elevated setup must never read files next to the executable: the camera source ships embedded
+  in Tourelle.exe.
 - No third-party code. The project uses Windows components only.
 - Warnings are errors (`/W4 /WX`).
 

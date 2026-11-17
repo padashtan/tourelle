@@ -31,8 +31,6 @@ public:
 
     HRESULT RuntimeClassInitialize(IMFMediaSource* source, DWORD streamId);
 
-    // Mode of the stream descriptor's current media type (the first mode by default).
-    VideoMode SelectedMode();
     // Mode of a media type (the first mode when it matches none).
     static VideoMode ModeOf(IMFMediaType* type);
     // Mode the stream was started with.

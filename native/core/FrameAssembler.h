@@ -16,8 +16,11 @@ public:
     // maxSize: frames growing beyond it are dropped (a faulty device cannot exhaust memory).
     void Reset(size_t expectedSize, size_t maxSize, Sink sink);
 
-    // One payload: bHeaderLength, bmHeaderInfo (bit 0 FID, bit 1 EOF, bit 6 ERR), then data.
+    // One payload: bHeaderLength, bmHeaderInfo (bit 0 FID, bit 1 EOF, bit 2 PTS, bit 3 SCR,
+    // bit 6 ERR), optional PTS/SCR, then data. Inconsistent headers mark the frame bad.
     void OnPayload(const uint8_t* data, size_t size);
+
+    static constexpr uint8_t kMaxHeaderLength = 12;
 
     // Data was lost (failed transfer): the frame in progress is incomplete.
     void MarkError() { error_ = true; }
