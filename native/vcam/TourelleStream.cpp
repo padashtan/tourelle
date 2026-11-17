@@ -95,10 +95,16 @@ IFACEMETHODIMP TourelleStream::GetStreamDescriptor(IMFStreamDescriptor** descrip
 }
 
 IFACEMETHODIMP TourelleStream::RequestSample(IUnknown* token) {
-    std::lock_guard guard(lock_);
-    if (shutdown_) return MF_E_SHUTDOWN;
-    if (state_ != MF_STREAM_STATE_RUNNING) return MF_E_INVALIDREQUEST;
-    tokens_.emplace_back(token);  // answered by the next camera frame
+    std::function<void()> wake;
+    {
+        std::lock_guard guard(lock_);
+        if (shutdown_) return MF_E_SHUTDOWN;
+        if (state_ != MF_STREAM_STATE_RUNNING) return MF_E_INVALIDREQUEST;
+        tokens_.emplace_back(token);  // answered by the next camera frame
+        lastRequest_ = GetTickCount64();
+        wake = wake_;
+    }
+    if (wake) wake();  // reopens the camera if the source stopped it while idle
     return S_OK;
 }
 
@@ -151,6 +157,7 @@ HRESULT TourelleStream::Start() {
 
     state_ = MF_STREAM_STATE_RUNNING;
     tokens_.clear();
+    lastRequest_ = GetTickCount64();
     return queue_->QueueEventParamVar(MEStreamStarted, GUID_NULL, S_OK, nullptr);
 }
 
@@ -174,6 +181,7 @@ void TourelleStream::Shutdown() {
     if (allocator_) allocator_->UninitializeSampleAllocator();
     allocator_.Reset();
     source_.Reset();
+    wake_ = nullptr;
 }
 
 void TourelleStream::DeliverFrame(const BYTE* yuy2, size_t size) {

@@ -70,6 +70,16 @@ private:
     void StopCamera();
     HRESULT MotorCommand(ULONG id, const BYTE* data, ULONG length);
 
+    // The Frame Server may keep the source started with no client left. The
+    // camera is closed after a few idle seconds (its LED goes off) and reopened
+    // by the next sample request.
+    static void CALLBACK OnIdleTimer(PTP_CALLBACK_INSTANCE, PVOID context, PTP_TIMER);
+    void StopIfIdle();
+    void Wake();
+    void CloseIdleTimer();
+    PTP_TIMER idleTimer_ = nullptr;
+    bool streaming_ = false;  // between Start and Stop
+
     std::recursive_mutex lock_;
     bool shutdown_ = false;
     bool started_ = false;   // MENewStream already sent once

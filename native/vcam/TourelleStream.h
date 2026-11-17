@@ -5,7 +5,9 @@
 #include <wrl/client.h>
 #include <wrl/implements.h>
 
+#include <atomic>
 #include <deque>
+#include <functional>
 #include <mutex>
 
 namespace tourelle {
@@ -49,6 +51,12 @@ public:
     void DeliverFrame(const BYTE* yuy2, size_t size);  // camera thread
     IMFAttributes* Attributes() const { return attributes_.Get(); }
 
+    // Called (outside the stream lock) on each sample request, so the source can
+    // reopen the camera after an idle stop.
+    void SetWakeHandler(std::function<void()> wake) { wake_ = std::move(wake); }
+    // Milliseconds since the last sample request (or since Start).
+    ULONGLONG IdleMilliseconds() const { return GetTickCount64() - lastRequest_; }
+
 private:
     HRESULT CreateMediaType(REFGUID subtype, IMFMediaType** type);
     HRESULT FillSample(const BYTE* yuy2, IMFSample* sample);
@@ -63,6 +71,8 @@ private:
     Microsoft::WRL::ComPtr<IMFVideoSampleAllocator> allocator_;
     GUID subtype_ = MFVideoFormat_NV12;
     std::deque<Microsoft::WRL::ComPtr<IUnknown>> tokens_;  // pending requests, may hold null tokens
+    std::function<void()> wake_;
+    std::atomic<ULONGLONG> lastRequest_{0};
 };
 
 }  // namespace tourelle

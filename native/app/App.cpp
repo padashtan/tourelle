@@ -30,6 +30,7 @@ using std::min;
 #include <vector>
 
 #include "Setup.h"
+#include "Strings.h"
 #include "TourelleClient.h"
 #include "Version.h"
 
@@ -77,7 +78,8 @@ enum ControlId : int {
     IdStep0 = 110,  // ..IdStep0 + 3
     IdInstall = 120, IdUninstall, IdMenu,
     IdMenuAbout = 200, IdMenuLicense, IdMenuNotices, IdMenuProject, IdMenuDocs, IdMenuRecenter, IdMenuInstall,
-    IdMenuUninstall, IdMenuQuit, IdMenuShow, IdMenuAutostart,
+    IdMenuUninstall, IdMenuQuit, IdMenuShow, IdMenuAutostart, IdMenuInvertPan, IdMenuInvertTilt,
+    IdMenuLanguage0 = 250,  // ..IdMenuLanguage0 + language count
     IdTab0 = 300,  // ..IdTab0 + 2
     IdProject = 310, IdClose,
 };
@@ -91,6 +93,8 @@ constexpr UINT WM_APP_SHOW = WM_APP + 4;  // sent by a second instance
 constexpr UINT kTrayIconId = 1;
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"Tourelle";
+constexpr wchar_t kSettingsKey[] = L"Software\\Tourelle";
+constexpr int kLanguageCount = static_cast<int>(std::size(tourelle::ui::kLanguages));
 constexpr UINT_PTR kFpsTimer = 1;
 constexpr UINT_PTR kRefreshTimer = 2;  // re-check the setup after a device change settles
 constexpr int kStepDegrees[] = {2, 5, 10, 20};
@@ -113,6 +117,11 @@ struct App {
     HWND hover = nullptr;
     int dpi = 96;
     int stepIndex = 1;  // 5 degrees
+
+    // Settings, kept in HKCU\Software\Tourelle
+    int language = 0;  // index in tourelle::ui::kLanguages
+    bool invertPan = false;
+    bool invertTilt = false;
     std::wstring iconFont = L"Segoe Fluent Icons";
     std::wstring statusText;
     ULONG_PTR gdiplus = 0;
@@ -127,7 +136,7 @@ struct App {
     std::mutex lock;          // guards frame, width, height, message, source
     std::vector<BYTE> frame;  // top-down BGRA
     UINT width = 0, height = 0;
-    std::wstring message = L"Starting…";
+    std::wstring message;
     ComPtr<IUnknown> source;  // live media source, also used for motor commands
     std::thread videoThread;
     HANDLE stopVideo = nullptr;  // signaled to end the current video thread
@@ -143,6 +152,58 @@ struct App {
     bool quitting = false;
     bool trayHintShown = false;
 } g;
+
+const tourelle::ui::Texts& T() { return *tourelle::ui::kLanguages[g.language]; }
+
+// Settings -------------------------------------------------------------------
+
+DWORD ReadSetting(const wchar_t* name, DWORD fallback) {
+    DWORD value = 0, size = sizeof(value);
+    return RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, name, RRF_RT_REG_DWORD, nullptr, &value, &size) ==
+                   ERROR_SUCCESS
+               ? value
+               : fallback;
+}
+
+void WriteSetting(const wchar_t* name, DWORD value) {
+    RegSetKeyValueW(HKEY_CURRENT_USER, kSettingsKey, name, REG_DWORD, &value, sizeof(value));
+}
+
+// First run: follow the Windows display language when it is one we have.
+int DefaultLanguage() {
+    switch (PRIMARYLANGID(GetUserDefaultUILanguage())) {
+        case LANG_FRENCH: return 1;
+        case LANG_SPANISH: return 2;
+        case LANG_POLISH: return 3;
+        default: return 0;
+    }
+}
+
+int LanguageFromCode(const wchar_t* code) {
+    for (int i = 0; i < kLanguageCount; ++i) {
+        if (_wcsicmp(tourelle::ui::kLanguages[i]->code, code) == 0) return i;
+    }
+    return -1;
+}
+
+void LoadSettings() {
+    wchar_t code[16]{};
+    DWORD size = sizeof(code);
+    const int saved = RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, L"Language", RRF_RT_REG_SZ, nullptr, code,
+                                   &size) == ERROR_SUCCESS
+                          ? LanguageFromCode(code)
+                          : -1;
+    g.language = saved >= 0 ? saved : DefaultLanguage();
+    g.invertPan = ReadSetting(L"InvertPan", 0) != 0;
+    g.invertTilt = ReadSetting(L"InvertTilt", 0) != 0;
+    g.stepIndex = static_cast<int>(std::min<DWORD>(ReadSetting(L"Step", 1), 3));
+}
+
+void SaveLanguage() {
+    const wchar_t* code = T().code;
+    RegSetKeyValueW(HKEY_CURRENT_USER, kSettingsKey, L"Language", REG_SZ, code,
+                    static_cast<DWORD>((wcslen(code) + 1) * sizeof(wchar_t)));
+}
 
 int Scale(int value) { return MulDiv(value, g.dpi, 96); }
 float ScaleF(float value) { return value * static_cast<float>(g.dpi) / 96.0f; }
@@ -314,7 +375,7 @@ void VideoLoop(HANDLE stop) {
     while (!stopped(0)) {
         ComPtr<IMFMediaSource> source;
         if (FAILED(tourelle::client::FindSource(&source))) {
-            SetVideoMessage(L"Tourelle Camera not found.");
+            SetVideoMessage(T().notFound);
             if (stopped(1000)) break;
             continue;
         }
@@ -341,7 +402,7 @@ void VideoLoop(HANDLE stop) {
         if (FAILED(hr)) {
             reader.Reset();
             source->Shutdown();
-            SetVideoMessage(L"The camera does not start. Is it plugged in?");
+            SetVideoMessage(T().noStart);
             if (stopped(2000)) break;
             continue;
         }
@@ -365,7 +426,7 @@ void VideoLoop(HANDLE stop) {
         reader.Reset();
         source->Shutdown();
         if (reason == WAIT_OBJECT_0) break;
-        SetVideoMessage(L"Video interrupted, reconnecting…");
+        SetVideoMessage(T().interrupted);
         if (stopped(1000)) break;
     }
     CoUninitialize();
@@ -406,7 +467,7 @@ void Move(int panSteps, int tiltSteps) {
     ComPtr<IMFMediaSource> temporary;  // no preview running (window hidden): open the camera just for this
     if (!source) {
         if (FAILED(tourelle::client::FindSource(&temporary))) {
-            SetStatus(L"“Tourelle Camera” is not available: the head cannot be moved.");
+            SetStatus(T().cannotMove);
             return;
         }
         temporary.As(&source);
@@ -414,24 +475,27 @@ void Move(int panSteps, int tiltSteps) {
     const int units = kStepDegrees[g.stepIndex] * kUnitsPerDegree;
     HRESULT hr = (panSteps == 0 && tiltSteps == 0)
                      ? tourelle::client::PanTiltReset(source.Get())
-                     : tourelle::client::PanTiltRelative(source.Get(), static_cast<int16_t>(panSteps * units),
-                                                         static_cast<int16_t>(tiltSteps * units * kTiltUp));
+                     : tourelle::client::PanTiltRelative(
+                           source.Get(), static_cast<int16_t>(panSteps * units * (g.invertPan ? -1 : 1)),
+                           static_cast<int16_t>(tiltSteps * units * kTiltUp * (g.invertTilt ? -1 : 1)));
     if (temporary) temporary->Shutdown();
     if (FAILED(hr)) {
         wchar_t text[96];
-        swprintf_s(text, L"Motor command failed (0x%08X).", static_cast<unsigned>(hr));
+        swprintf_s(text, T().motorFailed, static_cast<unsigned>(hr));
         SetStatus(text);
     }
 }
 
 void SelectStep(int index) {
     g.stepIndex = index;
+    WriteSetting(L"Step", static_cast<DWORD>(index));
     for (HWND button : g.steps) InvalidateRect(button, nullptr, FALSE);
 }
 
 void ShowAbout(int tab);
 void CloseAbout();
 void SetAutostart(bool enabled);
+void SetLanguage(int language);
 
 bool HandleKey(WPARAM key) {
     if (g.about && GetActiveWindow() == g.about) {
@@ -467,27 +531,25 @@ void RefreshSetup() {
         if (IsWindowVisible(g.window)) StartVideo();  // no preview while hidden in the notification area
     } else {
         StopVideo();
-        SetVideoMessage(g.setup.cameraPresent ? L"Click “Install” to set up Tourelle."
-                                              : L"Connect the camera, then click “Install”.");
+        SetVideoMessage(g.setup.cameraPresent ? T().clickInstall : T().connectThenInstall);
     }
 }
 
 void StartSetup(bool install) {
     if (g.busy) return;
     if (install && !g.setup.cameraPresent) {
-        MessageBoxW(g.window, L"Connect the camera first.", L"Tourelle", MB_ICONINFORMATION);
+        MessageBoxW(g.window, T().connectFirst, L"Tourelle", MB_ICONINFORMATION);
         return;
     }
     if (!install && MessageBoxW(g.window,
-                                L"Uninstall Tourelle and give the camera back to the Windows driver?\n\n"
-                                L"The motors will not be controllable any more.",
+                                T().confirmUninstall,
                                 L"Tourelle", MB_ICONQUESTION | MB_YESNO) != IDYES) {
         return;
     }
     g.busy = true;
     EnableWindow(g.install, FALSE);
     EnableWindow(g.uninstall, FALSE);
-    SetStatus(L"Waiting for administrator approval…");
+    SetStatus(T().waitingAdmin);
     if (!install) {
         StopVideo();  // release the camera before its driver changes
         tourelle::client::RemoveVirtualCamera();
@@ -503,21 +565,21 @@ void StartSetup(bool install) {
 void SetupDone(bool install, int code) {
     g.busy = false;
     if (code == -1) {
-        SetStatus(L"Cancelled.");
+        SetStatus(T().cancelled);
     } else if (code != 0) {
-        SetStatus(L"Setup failed.");
+        SetStatus(T().setupFailed);
     } else if (install) {
         HRESULT hr = tourelle::client::EnableVirtualCamera();  // per user: not from the elevated process
         if (FAILED(hr)) {
             wchar_t text[96];
-            swprintf_s(text, L"Virtual camera registration failed (0x%08X).", static_cast<unsigned>(hr));
+            swprintf_s(text, T().registrationFailed, static_cast<unsigned>(hr));
             SetStatus(text);
         } else {
-            SetStatus(L"Installed. Select “Tourelle Camera” in your apps.");
+            SetStatus(T().installed);
         }
     } else {
         SetAutostart(false);
-        SetStatus(L"Uninstalled. The camera uses the Windows driver again.");
+        SetStatus(T().uninstalled);
     }
     RefreshSetup();
 }
@@ -553,10 +615,19 @@ void AddTrayIcon() {
     icon.uCallbackMessage = WM_APP_TRAY;
     icon.hIcon = static_cast<HICON>(LoadImageW(g.instance, MAKEINTRESOURCEW(1), IMAGE_ICON,
                                                GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
-    wcscpy_s(icon.szTip, L"Tourelle: pan/tilt");
+    wcscpy_s(icon.szTip, T().trayTip);
     Shell_NotifyIconW(NIM_ADD, &icon);
     icon.uVersion = NOTIFYICON_VERSION_4;
     Shell_NotifyIconW(NIM_SETVERSION, &icon);
+}
+
+void UpdateTrayTip() {
+    NOTIFYICONDATAW icon{sizeof(icon)};
+    icon.hWnd = g.window;
+    icon.uID = kTrayIconId;
+    icon.uFlags = NIF_TIP | NIF_SHOWTIP;
+    wcscpy_s(icon.szTip, T().trayTip);
+    Shell_NotifyIconW(NIM_MODIFY, &icon);
 }
 
 void RemoveTrayIcon() {
@@ -589,8 +660,7 @@ void HideMain() {
     ShowWindow(g.window, SW_HIDE);
     if (!g.trayHintShown) {
         g.trayHintShown = true;
-        TrayNotification(L"Tourelle keeps running",
-                         L"Click the icon next to the clock to open it again. Right-click for more.");
+        TrayNotification(T().trayHintTitle, T().trayHintText);
     }
 }
 
@@ -602,14 +672,14 @@ void Quit() {
 void ShowTrayMenu(int x, int y) {
     HMENU menu = CreatePopupMenu();
     const bool visible = IsWindowVisible(g.window) != FALSE;
-    AppendMenuW(menu, MF_STRING, IdMenuShow, visible ? L"Hide Tourelle" : L"Show Tourelle");
+    AppendMenuW(menu, MF_STRING, IdMenuShow, visible ? T().menuHide : T().menuShow);
     SetMenuDefaultItem(menu, IdMenuShow, FALSE);
-    AppendMenuW(menu, MF_STRING | (g.setup.Ready() ? 0 : MF_GRAYED), IdMenuRecenter, L"Recenter the head");
+    AppendMenuW(menu, MF_STRING | (g.setup.Ready() ? 0 : MF_GRAYED), IdMenuRecenter, T().menuRecenter);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | (IsAutostart() ? MF_CHECKED : 0), IdMenuAutostart, L"Start with Windows");
-    AppendMenuW(menu, MF_STRING, IdMenuAbout, L"About Tourelle…");
+    AppendMenuW(menu, MF_STRING | (IsAutostart() ? MF_CHECKED : 0), IdMenuAutostart, T().menuAutostart);
+    AppendMenuW(menu, MF_STRING, IdMenuAbout, T().menuAbout);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, IdMenuQuit, L"Quit");
+    AppendMenuW(menu, MF_STRING, IdMenuQuit, T().menuQuit);
 
     SetForegroundWindow(g.window);  // required so the menu closes when clicking elsewhere
     const int command = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_BOTTOMALIGN, x, y, 0, g.window,
@@ -786,7 +856,7 @@ void PaintMain(HDC target, const RECT& area) {
 
         // Header
         DrawText(graphics, L"Tourelle", L"Segoe UI", 30, Gdiplus::FontStyleBold, R(22, 14, 300, 44), theme::Text);
-        DrawText(graphics, L"Live pan/tilt for your motorized webcam", L"Segoe UI", 14, Gdiplus::FontStyleRegular,
+        DrawText(graphics, T().subtitle, L"Segoe UI", 14, Gdiplus::FontStyleRegular,
                  R(24, 54, 600, 22), theme::Muted);
 
         // Video frame
@@ -795,23 +865,23 @@ void PaintMain(HDC target, const RECT& area) {
 
         // Move card
         FillRounded(graphics, RectF(Scale(kMoveCard)), ScaleF(14), theme::Panel, 255, &line);
-        DrawText(graphics, L"MOVE", L"Segoe UI", 12, Gdiplus::FontStyleBold, R(788, 98, 200, 18), theme::Accent);
-        DrawText(graphics, L"STEP", L"Segoe UI", 12, Gdiplus::FontStyleBold, R(788, 348, 200, 18), theme::Accent);
-        DrawText(graphics, L"Arrow keys move · Home recenters\n1–4 pick the step", L"Segoe UI", 12,
+        DrawText(graphics, T().move, L"Segoe UI", 12, Gdiplus::FontStyleBold, R(788, 98, 200, 18), theme::Accent);
+        DrawText(graphics, T().step, L"Segoe UI", 12, Gdiplus::FontStyleBold, R(788, 348, 200, 18), theme::Accent);
+        DrawText(graphics, T().hint, L"Segoe UI", 12,
                  Gdiplus::FontStyleRegular, R(788, 404, 220, 40), theme::Muted);
 
         // Setup card
         FillRounded(graphics, RectF(Scale(kSetupCard)), ScaleF(14), theme::Panel, 255, &line);
-        DrawText(graphics, L"SETUP", L"Segoe UI", 12, Gdiplus::FontStyleBold, R(788, 478, 200, 18), theme::Accent);
+        DrawText(graphics, T().setup, L"Segoe UI", 12, Gdiplus::FontStyleBold, R(788, 478, 200, 18), theme::Accent);
         const struct {
             bool ok;
             const wchar_t* yes;
             const wchar_t* no;
         } lines[] = {
-            {g.setup.cameraPresent, L"Camera connected", L"Camera not connected"},
-            {g.setup.winusbBound, L"Driver: Tourelle (WinUSB)", L"Driver: Windows default"},
-            {g.setup.sourceInstalled, L"Camera source installed", L"Camera source missing"},
-            {g.setup.virtualCameraListed, L"“Tourelle Camera” available", L"“Tourelle Camera” missing"},
+            {g.setup.cameraPresent, T().cameraYes, T().cameraNo},
+            {g.setup.winusbBound, T().driverYes, T().driverNo},
+            {g.setup.sourceInstalled, T().sourceYes, T().sourceNo},
+            {g.setup.virtualCameraListed, T().virtualCameraYes, T().virtualCameraNo},
         };
         for (int i = 0; i < 4; ++i) {
             const float y = 502.0f + 19.0f * static_cast<float>(i);
@@ -906,21 +976,30 @@ LRESULT CALLBACK VideoProc(HWND window, UINT message, WPARAM wParam, LPARAM lPar
 
 void ShowMenu() {
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING, IdMenuAbout, L"About Tourelle…");
-    AppendMenuW(menu, MF_STRING, IdMenuLicense, L"License (MIT)…");
-    AppendMenuW(menu, MF_STRING, IdMenuNotices, L"Trademarks && notices…");
+    AppendMenuW(menu, MF_STRING, IdMenuAbout, T().menuAbout);
+    AppendMenuW(menu, MF_STRING, IdMenuLicense, T().menuLicense);
+    AppendMenuW(menu, MF_STRING, IdMenuNotices, T().menuNotices);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING, IdMenuProject, L"Project page on GitHub");
-    AppendMenuW(menu, MF_STRING, IdMenuDocs, L"How it works");
+    AppendMenuW(menu, MF_STRING, IdMenuProject, T().menuProject);
+    AppendMenuW(menu, MF_STRING, IdMenuDocs, T().menuDocs);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | (g.setup.Ready() ? 0 : MF_GRAYED), IdMenuRecenter, L"Recenter the head\tHome");
-    AppendMenuW(menu, MF_STRING | (!g.busy && !g.setup.Ready() ? 0 : MF_GRAYED), IdMenuInstall, L"Install");
+    const std::wstring recenter = std::wstring(T().menuRecenter) + L"\tHome";
+    AppendMenuW(menu, MF_STRING | (g.setup.Ready() ? 0 : MF_GRAYED), IdMenuRecenter, recenter.c_str());
+    AppendMenuW(menu, MF_STRING | (g.invertPan ? MF_CHECKED : 0), IdMenuInvertPan, T().menuInvertPan);
+    AppendMenuW(menu, MF_STRING | (g.invertTilt ? MF_CHECKED : 0), IdMenuInvertTilt, T().menuInvertTilt);
+    HMENU languages = CreatePopupMenu();
+    for (int i = 0; i < kLanguageCount; ++i) {
+        AppendMenuW(languages, MF_STRING | (i == g.language ? MF_CHECKED : 0), IdMenuLanguage0 + i,
+                    tourelle::ui::kLanguages[i]->name);
+    }
+    AppendMenuW(menu, MF_POPUP, reinterpret_cast<UINT_PTR>(languages), T().menuLanguage);  // owned by menu
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (!g.busy && !g.setup.Ready() ? 0 : MF_GRAYED), IdMenuInstall, T().install);
     AppendMenuW(menu, MF_STRING | (!g.busy && g.setup.AnythingInstalled() ? 0 : MF_GRAYED), IdMenuUninstall,
-                L"Uninstall");
+                T().uninstall);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | (IsAutostart() ? MF_CHECKED : 0), IdMenuAutostart,
-                L"Start with Windows (in the notification area)");
-    AppendMenuW(menu, MF_STRING, IdMenuQuit, L"Quit");
+    AppendMenuW(menu, MF_STRING | (IsAutostart() ? MF_CHECKED : 0), IdMenuAutostart, T().menuAutostart);
+    AppendMenuW(menu, MF_STRING, IdMenuQuit, T().menuQuit);
 
     RECT button;
     GetWindowRect(g.menu, &button);
@@ -937,34 +1016,24 @@ void ShowMenu() {
         case IdMenuInstall: StartSetup(true); break;
         case IdMenuUninstall: StartSetup(false); break;
         case IdMenuAutostart: SetAutostart(!IsAutostart()); break;
+        case IdMenuInvertPan:
+            g.invertPan = !g.invertPan;
+            WriteSetting(L"InvertPan", g.invertPan);
+            break;
+        case IdMenuInvertTilt:
+            g.invertTilt = !g.invertTilt;
+            WriteSetting(L"InvertTilt", g.invertTilt);
+            break;
         case IdMenuQuit: Quit(); break;
-        default: break;
+        default:
+            if (command >= IdMenuLanguage0 && command < IdMenuLanguage0 + kLanguageCount) {
+                SetLanguage(command - IdMenuLanguage0);
+            }
+            break;
     }
 }
 
 // About box --------------------------------------------------------------------
-
-constexpr wchar_t kAboutText[] =
-    L"Tourelle " TOURELLE_VERSION_WIDE L"\r\n"
-    L"Live pan/tilt for the motorized Logitech® QuickCam® Sphere AF webcam on Windows 11, without a vendor driver.\r\n"
-    L"\r\n"
-    L"AUTHOR\r\n"
-    L"padashtan  —  https://github.com/padashtan\r\n"
-    L"Developed with the help of Claude (Anthropic).\r\n"
-    L"\r\n"
-    L"PROJECT\r\n"
-    TOURELLE_PROJECT_URL L"\r\n"
-    L"Source code, documentation and releases. Bug reports and contributions are welcome.\r\n"
-    L"\r\n"
-    L"HOW IT WORKS\r\n"
-    L"Tourelle drives the camera from user mode through Microsoft's WinUSB driver: UVC negotiation, isochronous "
-    L"video streaming and the camera's hidden motor unit. The video is published as the Windows 11 virtual camera "
-    L"\"Tourelle Camera\", so any app can use it while you steer the head.\r\n"
-    L"\r\n"
-    L"KEYBOARD\r\n"
-    L"Arrow keys: move the head\r\n"
-    L"Home: recenter\r\n"
-    L"1 to 4: step of 2°, 5°, 10° or 20°\r\n";
 
 constexpr wchar_t kLicenseText[] =
     L"MIT License\r\n"
@@ -986,33 +1055,12 @@ constexpr wchar_t kLicenseText[] =
     L"CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER "
     L"DEALINGS IN THE SOFTWARE.\r\n";
 
-constexpr wchar_t kNoticesText[] =
-    L"TRADEMARKS\r\n"
-    L"Logitech, QuickCam, Orbit and Sphere are trademarks or registered trademarks of Logitech and/or its "
-    L"affiliates. They are used only to identify the hardware Tourelle is compatible with. Tourelle is an "
-    L"independent project, not affiliated with, endorsed by, or sponsored by Logitech.\r\n"
-    L"\r\n"
-    L"WHAT TOURELLE CHANGES\r\n"
-    L"\"Install\" hands the camera's video function to Microsoft's WinUSB driver, installs the camera source in "
-    L"C:\\Program Files\\Tourelle and registers the \"Tourelle Camera\" virtual camera. \"Uninstall\" undoes all "
-    L"three and gives the camera back to the Windows driver.\r\n"
-    L"\r\n"
-    L"NO WARRANTY\r\n"
-    L"Tourelle is provided as is, without warranty of any kind. See the License tab.\r\n"
-    L"\r\n"
-    L"THIRD-PARTY SOFTWARE\r\n"
-    L"Tourelle bundles no third-party code and no Logitech code, firmware or assets. It uses Windows components "
-    L"only: WinUSB, SetupAPI, Media Foundation and the Windows Camera Frame Server. The extension unit identifiers "
-    L"it uses also appear in the open-source libwebcam/uvcdynctrl mappings.\r\n"
-    L"\r\n"
-    L"PRIVACY\r\n"
-    L"Tourelle does not collect, store or send any data. The video never leaves your computer.\r\n";
-
 constexpr RECT kAboutTextRect{24, 124, 576, 488};
 
 void SelectAboutTab(int tab) {
     g.aboutTab = tab;
-    const wchar_t* texts[] = {kAboutText, kLicenseText, kNoticesText};
+    const std::wstring license = std::wstring(T().licenseNote) + kLicenseText;
+    const wchar_t* texts[] = {T().aboutText, license.c_str(), T().noticesText};
     SendMessageW(g.aboutText, WM_SETFONT, reinterpret_cast<WPARAM>(tab == 1 ? g.monoFont : g.textFont), FALSE);
     SetWindowTextW(g.aboutText, texts[tab]);
     for (HWND button : g.tabs) InvalidateRect(button, nullptr, FALSE);
@@ -1027,15 +1075,15 @@ LRESULT CALLBACK AboutProc(HWND window, UINT message, WPARAM wParam, LPARAM lPar
         case WM_CREATE: {
             g.about = window;
             UseDarkTitleBar(window);
-            const wchar_t* names[] = {L"About", L"License", L"Notices"};
+            const wchar_t* names[] = {T().tabAbout, T().tabLicense, T().tabNotices};
             for (int i = 0; i < 3; ++i) g.tabs[i] = MakeButton(window, IdTab0 + i, names[i], 24 + i * 104, 80, 96, 32);
             const RECT text = Scale(kAboutTextRect);
             g.aboutText = CreateWindowExW(0, L"EDIT", L"",
                                           WS_CHILD | WS_VISIBLE | WS_VSCROLL | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL,
                                           text.left + Scale(12), text.top + Scale(10), text.right - text.left - Scale(16),
                                           text.bottom - text.top - Scale(16), window, nullptr, g.instance, nullptr);
-            MakeButton(window, IdProject, L"Project page", 24, 504, 150, 36);
-            MakeButton(window, IdClose, L"Close", 452, 504, 124, 36);
+            MakeButton(window, IdProject, T().projectPage, 24, 504, 150, 36);
+            MakeButton(window, IdClose, T().close, 452, 504, 124, 36);
             SelectAboutTab(static_cast<int>(reinterpret_cast<INT_PTR>(
                 reinterpret_cast<CREATESTRUCTW*>(lParam)->lpCreateParams)));
             return 0;
@@ -1058,7 +1106,7 @@ LRESULT CALLBACK AboutProc(HWND window, UINT message, WPARAM wParam, LPARAM lPar
                 FillRounded(graphics, RectF(Scale(kAboutTextRect)), ScaleF(12), theme::Panel, 255, &line);
                 DrawText(graphics, L"Tourelle", L"Segoe UI", 26, Gdiplus::FontStyleBold,
                          Gdiplus::RectF(ScaleF(80), ScaleF(16), ScaleF(300), ScaleF(36)), theme::Text);
-                DrawText(graphics, L"Version " TOURELLE_VERSION_WIDE L" · MIT License", L"Segoe UI", 13,
+                DrawText(graphics, T().versionLine, L"Segoe UI", 13,
                          Gdiplus::FontStyleRegular, Gdiplus::RectF(ScaleF(82), ScaleF(50), ScaleF(400), ScaleF(20)),
                          theme::Muted);
             }
@@ -1115,7 +1163,7 @@ void ShowAbout(int tab) {
     RECT owner;
     GetWindowRect(g.window, &owner);
     EnableWindow(g.window, FALSE);  // modal
-    HWND about = CreateWindowExW(0, L"TourelleAbout", L"About Tourelle", style,
+    HWND about = CreateWindowExW(0, L"TourelleAbout", T().aboutCaption, style,
                                  owner.left + (owner.right - owner.left - width) / 2,
                                  owner.top + (owner.bottom - owner.top - height) / 2, width, height, g.window, nullptr,
                                  g.instance, reinterpret_cast<LPVOID>(static_cast<INT_PTR>(tab)));
@@ -1142,8 +1190,20 @@ void CreateControls() {
         g.steps[i] = MakeButton(g.window, IdStep0 + i, (std::to_wstring(kStepDegrees[i]) + L"°").c_str(), 788 + i * 54,
                                 370, 48, 30);
     }
-    g.install = MakeButton(g.window, IdInstall, L"Install", 788, 584, 100, 30);
-    g.uninstall = MakeButton(g.window, IdUninstall, L"Uninstall", 896, 584, 100, 30);
+    g.install = MakeButton(g.window, IdInstall, T().install, 788, 584, 100, 30);
+    g.uninstall = MakeButton(g.window, IdUninstall, T().uninstall, 896, 584, 100, 30);
+}
+
+void SetLanguage(int language) {
+    g.language = language;
+    SaveLanguage();
+    CloseAbout();  // reopens in the new language next time
+    SetWindowTextW(g.install, T().install);
+    SetWindowTextW(g.uninstall, T().uninstall);
+    UpdateTrayTip();
+    g.statusText.clear();
+    RedrawWindow(g.window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
+    if (!g.setup.Ready()) RefreshSetup();  // the video area shows a setup message: redo it
 }
 
 LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
@@ -1268,6 +1328,8 @@ HFONT MakeFont(const wchar_t* face, int points) {
 int RunApp(HINSTANCE instance, int show, bool trayOnly) {
     g.instance = instance;
     g.taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
+    LoadSettings();
+    g.message = T().starting;
     g.trayHintShown = trayOnly;  // started with Windows: the user knows where it lives
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     MFStartup(MF_VERSION);

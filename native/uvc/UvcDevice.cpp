@@ -212,13 +212,11 @@ void UvcDevice::Start(const FrameFormat& format, uint32_t interval, FrameCallbac
 }
 
 void UvcDevice::Stop() {
-    if (!running_.exchange(false)) {
-        if (thread_.joinable()) thread_.join();
-        return;
-    }
-    WinUsb_AbortPipe(stream_, streamEndpoint_);
+    if (running_.exchange(false)) WinUsb_AbortPipe(stream_, streamEndpoint_);
     if (thread_.joinable()) thread_.join();
-    WinUsb_SetCurrentAlternateSetting(stream_, 0);  // release the bandwidth
+    // Always back to alternate setting 0, even if the stream thread already
+    // ended on an error: it releases the bandwidth and the camera turns its LED off.
+    WinUsb_SetCurrentAlternateSetting(stream_, 0);
 }
 
 void UvcDevice::StreamLoop() {

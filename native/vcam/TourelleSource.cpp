@@ -15,6 +15,7 @@ namespace tourelle {
 namespace {
 
 constexpr DWORD kStreamId = 0;
+constexpr ULONGLONG kIdleStopMs = 3000;  // close the camera after this long without a sample request
 constexpr uint32_t kFrameInterval = 10'000'000 / TourelleStream::kFps;  // 100 ns units
 
 HRESULT HResultFromException() {
@@ -46,12 +47,46 @@ HRESULT TourelleSource::RuntimeClassInitialize() {
     if (FAILED(hr = stream_->GetStreamDescriptor(&streamDescriptor))) return hr;
     IMFStreamDescriptor* descriptors[] = {streamDescriptor.Get()};
     if (FAILED(hr = MFCreatePresentationDescriptor(1, descriptors, &descriptor_))) return hr;
-    return descriptor_->SelectStream(0);
+    if (FAILED(hr = descriptor_->SelectStream(0))) return hr;
+
+    stream_->SetWakeHandler([this] { Wake(); });  // the stream never outlives our Shutdown
+    idleTimer_ = CreateThreadpoolTimer(&TourelleSource::OnIdleTimer, this, nullptr);
+    if (!idleTimer_) return HRESULT_FROM_WIN32(GetLastError());
+    FILETIME due{};
+    ULARGE_INTEGER relative;
+    relative.QuadPart = static_cast<ULONGLONG>(-10'000'000LL);  // first check in 1 s
+    due.dwLowDateTime = relative.LowPart;
+    due.dwHighDateTime = relative.HighPart;
+    SetThreadpoolTimer(idleTimer_, &due, 1000, 200);
+    return S_OK;
 }
 
 TourelleSource::~TourelleSource() {
     if (!shutdown_) Shutdown();
+    CloseIdleTimer();
     if (mfStarted_) MFShutdown();
+}
+
+void CALLBACK TourelleSource::OnIdleTimer(PTP_CALLBACK_INSTANCE, PVOID context, PTP_TIMER) {
+    static_cast<TourelleSource*>(context)->StopIfIdle();
+}
+
+void TourelleSource::StopIfIdle() {
+    std::lock_guard guard(lock_);
+    if (!shutdown_ && camera_ && stream_->IdleMilliseconds() > kIdleStopMs) StopCamera();
+}
+
+void TourelleSource::Wake() {
+    std::lock_guard guard(lock_);
+    if (!shutdown_ && streaming_ && !camera_) StartCamera();
+}
+
+void TourelleSource::CloseIdleTimer() {
+    if (!idleTimer_) return;
+    SetThreadpoolTimer(idleTimer_, nullptr, 0, 0);
+    WaitForThreadpoolTimerCallbacks(idleTimer_, TRUE);  // never under lock_: the callback takes it
+    CloseThreadpoolTimer(idleTimer_);
+    idleTimer_ = nullptr;
 }
 
 HRESULT TourelleSource::CreateSourceAttributes() {
@@ -122,6 +157,7 @@ IFACEMETHODIMP TourelleSource::Start(IMFPresentationDescriptor* descriptor, cons
 
     HRESULT hr = StartCamera();
     if (FAILED(hr)) return hr;
+    streaming_ = true;
 
     ComPtr<IUnknown> stream;
     stream_.As(&stream);
@@ -139,6 +175,7 @@ IFACEMETHODIMP TourelleSource::Start(IMFPresentationDescriptor* descriptor, cons
 IFACEMETHODIMP TourelleSource::Stop() {
     std::lock_guard guard(lock_);
     if (shutdown_) return MF_E_SHUTDOWN;
+    streaming_ = false;
     StopCamera();
     HRESULT hr = stream_->Stop();
     if (FAILED(hr)) return hr;
@@ -148,8 +185,14 @@ IFACEMETHODIMP TourelleSource::Stop() {
 IFACEMETHODIMP TourelleSource::Pause() { return MF_E_INVALID_STATE_TRANSITION; }
 
 IFACEMETHODIMP TourelleSource::Shutdown() {
+    {
+        std::lock_guard guard(lock_);
+        if (shutdown_) return MF_E_SHUTDOWN;
+    }
+    CloseIdleTimer();  // outside lock_: waits for a running callback, which takes lock_
     std::lock_guard guard(lock_);
     if (shutdown_) return MF_E_SHUTDOWN;
+    streaming_ = false;
     StopCamera();  // before the stream goes away: the camera thread feeds it
     if (stream_) stream_->Shutdown();
     if (queue_) queue_->Shutdown();

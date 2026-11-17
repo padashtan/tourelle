@@ -66,10 +66,13 @@ The live preview starts as soon as setup is done.
 
 - **In Tourelle.exe**: the arrow buttons or the keyboard arrows move the head,
   and **⌂** or the Home key recenters it. You can also pick the step size (2° to 20°, or keys 1–4).
+- **Options** (☰ menu): invert left/right or up/down, and pick the language
+  (English, Français, Español, Polski). Settings are kept per user.
 - **From the notification area**: closing the window keeps Tourelle next to the
   clock. Click the icon to open it again; right-click it to recenter the head,
   turn **Start with Windows** on or off, or quit. While the window is hidden, the
-  preview stops, so the camera is only busy when an app uses it.
+  preview stops. The camera (and its LED) switches off a few seconds after the
+  last app stops using it.
 - **In your video app**: select **Tourelle Camera**. Keep Tourelle.exe open next
   to it and steer the head during the call. Several apps can use the camera at the same time.
 - **From scripts**: `tourelle-cli move <pan°> <tilt°>` and `tourelle-cli reset`.
