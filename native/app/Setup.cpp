@@ -267,6 +267,53 @@ Status Query() {
     return status;
 }
 
+std::wstring Describe() {
+    std::wstring text;
+    const auto line = [&](const std::wstring& name, const std::wstring& value) {
+        text += name + L": " + (value.empty() ? L"-" : value) + L"\r\n";
+    };
+    const std::wstring id = FindVideoFunction(false);
+    line(L"Video function", id);
+    if (!id.empty()) {
+        line(L"  present", FindVideoFunction(true).empty() ? L"no" : L"yes");
+        line(L"  service", DevNodeProperty(id, CM_DRP_SERVICE));
+        line(L"  class", DevNodeProperty(id, CM_DRP_CLASSGUID));
+    }
+    const std::wstring dll = RegisteredDllPath();
+    line(L"Camera source", dll);
+    if (!dll.empty()) {
+        WIN32_FILE_ATTRIBUTE_DATA data{};
+        if (GetFileAttributesExW(dll.c_str(), GetFileExInfoStandard, &data)) {
+            SYSTEMTIME written{};
+            FileTimeToSystemTime(&data.ftLastWriteTime, &written);
+            wchar_t info[96];
+            swprintf_s(info, L"%lu bytes, written %04u-%02u-%02u %02u:%02u UTC", data.nFileSizeLow, written.wYear,
+                       written.wMonth, written.wDay, written.wHour, written.wMinute);
+            line(L"  file", info);
+        } else {
+            line(L"  file", L"missing");
+        }
+    }
+    line(L"Virtual camera listed", client::IsVirtualCameraListed() ? L"yes" : L"no");
+
+    SC_HANDLE manager = OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT);
+    for (const wchar_t* name : {L"FrameServer", L"FrameServerMonitor"}) {
+        std::wstring state = L"unknown";
+        if (SC_HANDLE service = manager ? OpenServiceW(manager, name, SERVICE_QUERY_STATUS) : nullptr) {
+            SERVICE_STATUS status{};
+            if (QueryServiceStatus(service, &status)) {
+                state = status.dwCurrentState == SERVICE_RUNNING   ? L"running"
+                        : status.dwCurrentState == SERVICE_STOPPED ? L"stopped"
+                                                                   : std::to_wstring(status.dwCurrentState);
+            }
+            CloseServiceHandle(service);
+        }
+        line(std::wstring(L"Service ") + name, state);
+    }
+    if (manager) CloseServiceHandle(manager);
+    return text;
+}
+
 void InstallElevated(const std::wstring& sourceDll) {
     InstallSource(sourceDll);
 

@@ -22,13 +22,24 @@ using std::min;
 }  // namespace Gdiplus
 #include <gdiplus.h>
 
+#include <roapi.h>
+#include <Xinput.h>  // button constants only; XInput itself is loaded by Gamepad
+
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
+#include "Autofocus.h"
+#include "DemoPattern.h"
+#include "FaceTracker.h"
+#include "Gamepad.h"
+#include "Imaging.h"
+#include "Motor.h"
 #include "Setup.h"
 #include "Strings.h"
 #include "TourelleClient.h"
@@ -77,8 +88,12 @@ enum ControlId : int {
     IdUp = 100, IdDown, IdLeft, IdRight, IdCenter,
     IdStep0 = 110,  // ..IdStep0 + 3
     IdInstall = 120, IdUninstall, IdMenu,
+    IdFocusFar = 130, IdAutofocus, IdFocusNear,
+    IdPreset0 = 140,  // ..IdPreset0 + 3
+    IdFollow = 150,
     IdMenuAbout = 200, IdMenuLicense, IdMenuNotices, IdMenuProject, IdMenuDocs, IdMenuRecenter, IdMenuInstall,
     IdMenuUninstall, IdMenuQuit, IdMenuShow, IdMenuAutostart, IdMenuInvertPan, IdMenuInvertTilt,
+    IdMenuHotkeys, IdMenuGamepad, IdMenuDiagnostics, IdMenuImageSettings, IdMenuFollow,
     IdMenuLanguage0 = 250,  // ..IdMenuLanguage0 + language count
     IdTab0 = 300,  // ..IdTab0 + 2
     IdProject = 310, IdClose,
@@ -90,6 +105,9 @@ constexpr UINT WM_APP_FRAME = WM_APP + 1;
 constexpr UINT WM_APP_SETUP_DONE = WM_APP + 2;
 constexpr UINT WM_APP_TRAY = WM_APP + 3;  // notification area icon events
 constexpr UINT WM_APP_SHOW = WM_APP + 4;  // sent by a second instance
+constexpr UINT WM_APP_STATUS = WM_APP + 5;  // lParam: std::wstring* from a worker thread, freed by the UI
+constexpr UINT WM_APP_PRESET_SAVE = WM_APP + 6;  // wParam: preset index (right-click on a preset button)
+constexpr UINT WM_APP_FOLLOW_OFF = WM_APP + 7;  // face tracking stopped by itself
 constexpr UINT kTrayIconId = 1;
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"Tourelle";
@@ -97,31 +115,61 @@ constexpr wchar_t kSettingsKey[] = L"Software\\Tourelle";
 constexpr int kLanguageCount = static_cast<int>(std::size(tourelle::ui::kLanguages));
 constexpr UINT_PTR kFpsTimer = 1;
 constexpr UINT_PTR kRefreshTimer = 2;  // re-check the setup after a device change settles
+constexpr UINT_PTR kGamepadTimer = 3;
 constexpr int kStepDegrees[] = {2, 5, 10, 20};
-constexpr int kUnitsPerDegree = 64;
+constexpr int kUnitsPerDegree = tourelle::core::kUnitsPerDegree;
 constexpr int kTiltUp = -1;  // the camera's positive tilt points down
+constexpr int kPresetCount = 4;
+constexpr int kFocusStep = 16;
+constexpr int kHotkeyIds = 20;  // RegisterHotKey ids 1..kHotkeyIds
 constexpr DWORD kVideoStream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
 constexpr wchar_t kDocsUrl[] = TOURELLE_PROJECT_URL L"/blob/main/docs/how-it-works.md";
 
 // Layout, in 96-dpi pixels.
-constexpr int kClientWidth = 1040, kClientHeight = 668;
+constexpr int kClientWidth = 1040, kClientHeight = 740;
 constexpr RECT kVideoRect{24, 84, 744, 624};
-constexpr RECT kMoveCard{768, 84, 1016, 448};
-constexpr RECT kSetupCard{768, 464, 1016, 624};
+constexpr RECT kMoveCard{768, 84, 1016, 560};
+constexpr RECT kSetupCard{768, 576, 1016, 724};
+constexpr RECT kStatusRect{24, 634, 744, 724};
 
 struct App {
     HINSTANCE instance = nullptr;
     HWND window = nullptr, video = nullptr, menu = nullptr, install = nullptr, uninstall = nullptr;
     HWND pad[5]{};
     HWND steps[4]{};
+    HWND presets[kPresetCount]{};
+    HWND focusButtons[3]{};
+    HWND follow = nullptr;
     HWND hover = nullptr;
     int dpi = 96;
     int stepIndex = 1;  // 5 degrees
+    bool demo = false;  // --demo: synthetic image, no camera needed
 
     // Settings, kept in HKCU\Software\Tourelle
     int language = 0;  // index in tourelle::ui::kLanguages
     bool invertPan = false;
     bool invertTilt = false;
+    bool hotkeys = true;
+    bool gamepad = true;
+    bool presetSet[kPresetCount]{};
+    tourelle::core::PanTilt presetPosition[kPresetCount]{};
+
+    // Motors and focus
+    std::atomic<int> focus{0};
+    std::atomic<bool> autofocusing{false};
+    tourelle::core::PanTilt demoPosition{};  // head position simulated in demo mode
+
+    // Face tracking
+    std::atomic<bool> following{false};
+    std::thread followThread;
+    HANDLE stopFollow = nullptr;
+    tourelle::app::FaceBox face{};  // last detected face, under lock
+    ULONGLONG faceTime = 0;         // GetTickCount64 of that detection, 0 when none
+
+    // Inputs
+    std::unique_ptr<tourelle::app::Gamepad> pad360;
+    uint16_t padButtons = 0;
+    ULONGLONG padLastMove = 0;
     std::wstring iconFont = L"Segoe Fluent Icons";
     std::wstring statusText;
     ULONG_PTR gdiplus = 0;
@@ -197,6 +245,21 @@ void LoadSettings() {
     g.invertPan = ReadSetting(L"InvertPan", 0) != 0;
     g.invertTilt = ReadSetting(L"InvertTilt", 0) != 0;
     g.stepIndex = static_cast<int>(std::min<DWORD>(ReadSetting(L"Step", 1), 3));
+    g.hotkeys = ReadSetting(L"Hotkeys", 1) != 0;
+    g.gamepad = ReadSetting(L"Gamepad", 1) != 0;
+    for (int i = 0; i < kPresetCount; ++i) {
+        const std::wstring name = L"Preset" + std::to_wstring(i + 1);
+        DWORD packed = 0, packedSize = sizeof(packed);
+        g.presetSet[i] = RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, name.c_str(), RRF_RT_REG_DWORD, nullptr,
+                                      &packed, &packedSize) == ERROR_SUCCESS;
+        g.presetPosition[i] = {static_cast<int16_t>(packed >> 16), static_cast<int16_t>(packed & 0xFFFF)};
+    }
+}
+
+void SavePresetSetting(int index) {
+    const auto& p = g.presetPosition[index];
+    const DWORD packed = (static_cast<DWORD>(static_cast<uint16_t>(p.pan)) << 16) | static_cast<uint16_t>(p.tilt);
+    WriteSetting((L"Preset" + std::to_wstring(index + 1)).c_str(), packed);
 }
 
 void SaveLanguage() {
@@ -277,8 +340,14 @@ void UseDarkMenus() {
 
 void SetStatus(const std::wstring& text) {
     g.statusText = text;
-    RECT line{0, Scale(632), Scale(kClientWidth), Scale(kClientHeight)};
+    RECT line = Scale(kStatusRect);
     InvalidateRect(g.window, &line, FALSE);
+}
+
+// From a worker thread: the UI thread takes ownership of the string.
+void PostStatus(const std::wstring& text) {
+    auto* copy = new std::wstring(text);
+    if (!PostMessageW(g.window, WM_APP_STATUS, 0, reinterpret_cast<LPARAM>(copy))) delete copy;
 }
 
 // Video ----------------------------------------------------------------------
@@ -432,10 +501,34 @@ void VideoLoop(HANDLE stop) {
     CoUninitialize();
 }
 
+// --demo: a synthetic scene that follows the simulated head position.
+void DemoLoop(HANDLE stop) {
+    constexpr UINT32 width = 640, height = 480;
+    std::vector<BYTE> pixels(static_cast<size_t>(width) * height * 4);
+    const auto start = std::chrono::steady_clock::now();
+    while (WaitForSingleObject(stop, 33) == WAIT_TIMEOUT) {
+        tourelle::core::PanTilt position;
+        {
+            std::lock_guard guard(g.lock);
+            position = g.demoPosition;
+        }
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        tourelle::core::DrawDemoFrame(pixels.data(), width, height, position, seconds);
+        {
+            std::lock_guard guard(g.lock);
+            g.frame = pixels;
+            g.width = width;
+            g.height = height;
+        }
+        ++g.frames;
+        PostMessageW(g.window, WM_APP_FRAME, 0, 0);
+    }
+}
+
 void StartVideo() {
     if (g.videoThread.joinable()) return;
     g.stopVideo = CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    g.videoThread = std::thread(VideoLoop, g.stopVideo);
+    g.videoThread = std::thread(g.demo ? DemoLoop : VideoLoop, g.stopVideo);
 }
 
 void StopVideo() {
@@ -453,43 +546,372 @@ void StopVideo() {
 
 // Motor ----------------------------------------------------------------------
 
-void Move(int panSteps, int tiltSteps) {
-    // Key auto-repeat fires about 30 times a second: keep the motor queue sane.
-    const auto now = std::chrono::steady_clock::now();
-    if (now - g.lastMove < std::chrono::milliseconds(120)) return;
-    g.lastMove = now;
-
+// Runs action with the live media source, or a temporary one while no preview runs
+// (window hidden). Any thread with COM initialized.
+HRESULT WithSource(const std::function<HRESULT(IUnknown*)>& action) {
     ComPtr<IUnknown> source;
     {
         std::lock_guard guard(g.lock);
         source = g.source;
     }
-    ComPtr<IMFMediaSource> temporary;  // no preview running (window hidden): open the camera just for this
+    ComPtr<IMFMediaSource> temporary;
     if (!source) {
-        if (FAILED(tourelle::client::FindSource(&temporary))) {
-            SetStatus(T().cannotMove);
-            return;
-        }
+        HRESULT hr = tourelle::client::FindSource(&temporary);
+        if (FAILED(hr)) return hr;
         temporary.As(&source);
     }
-    const int units = kStepDegrees[g.stepIndex] * kUnitsPerDegree;
-    HRESULT hr = (panSteps == 0 && tiltSteps == 0)
-                     ? tourelle::client::PanTiltReset(source.Get())
-                     : tourelle::client::PanTiltRelative(
-                           source.Get(), static_cast<int16_t>(panSteps * units * (g.invertPan ? -1 : 1)),
-                           static_cast<int16_t>(tiltSteps * units * kTiltUp * (g.invertTilt ? -1 : 1)));
+    const HRESULT hr = action(source.Get());
     if (temporary) temporary->Shutdown();
-    if (FAILED(hr)) {
-        wchar_t text[96];
-        swprintf_s(text, T().motorFailed, static_cast<unsigned>(hr));
-        SetStatus(text);
+    return hr;
+}
+
+void ReportMotor(HRESULT hr, bool fromWorker) {
+    if (SUCCEEDED(hr)) return;
+    std::wstring text;
+    if (hr == HRESULT_FROM_WIN32(ERROR_NOT_FOUND)) {
+        text = T().cannotMove;
+    } else {
+        wchar_t buffer[128];
+        swprintf_s(buffer, T().motorFailed, static_cast<unsigned>(hr));
+        text = buffer;
     }
+    fromWorker ? PostStatus(text) : SetStatus(text);
+}
+
+// Moves in camera units, regardless of the inversion settings (aiming, face tracking).
+void MoveUnits(tourelle::core::PanTilt delta, bool fromWorker = false) {
+    if (delta.pan == 0 && delta.tilt == 0) return;
+    if (g.demo) {
+        std::lock_guard guard(g.lock);
+        g.demoPosition = {tourelle::core::ClampPan(g.demoPosition.pan + delta.pan),
+                          tourelle::core::ClampTilt(g.demoPosition.tilt + delta.tilt)};
+        return;
+    }
+    ReportMotor(WithSource([&](IUnknown* source) {
+                    return tourelle::client::PanTiltRelative(source, tourelle::core::ToMotorValue(delta.pan),
+                                                             tourelle::core::ToMotorValue(delta.tilt));
+                }),
+                fromWorker);
+}
+
+void Recenter() {
+    if (g.demo) {
+        std::lock_guard guard(g.lock);
+        g.demoPosition = {};
+        return;
+    }
+    ReportMotor(WithSource([](IUnknown* source) { return tourelle::client::PanTiltReset(source); }), false);
+}
+
+// Arrow buttons and keys: steps in the user's directions.
+void Move(int panSteps, int tiltSteps) {
+    // Key auto-repeat fires about 30 times a second; the source merges moves, but stay reasonable.
+    const auto now = std::chrono::steady_clock::now();
+    if (now - g.lastMove < std::chrono::milliseconds(60)) return;
+    g.lastMove = now;
+    if (panSteps == 0 && tiltSteps == 0) {
+        Recenter();
+        return;
+    }
+    const int units = kStepDegrees[g.stepIndex] * kUnitsPerDegree;
+    MoveUnits({panSteps * units * (g.invertPan ? -1 : 1), tiltSteps * units * kTiltUp * (g.invertTilt ? -1 : 1)});
 }
 
 void SelectStep(int index) {
     g.stepIndex = index;
     WriteSetting(L"Step", static_cast<DWORD>(index));
     for (HWND button : g.steps) InvalidateRect(button, nullptr, FALSE);
+}
+
+// Presets ----------------------------------------------------------------------
+
+void GoToPreset(int index) {
+    if (index < 0 || index >= kPresetCount) return;
+    if (!g.presetSet[index]) {
+        SetStatus(T().presetEmpty);
+        return;
+    }
+    const tourelle::core::PanTilt target = g.presetPosition[index];
+    if (g.demo) {
+        std::lock_guard guard(g.lock);
+        g.demoPosition = target;
+        return;
+    }
+    bool known = true;
+    ReportMotor(WithSource([&](IUnknown* source) {
+                    int16_t pan = 0, tilt = 0;
+                    HRESULT hr = tourelle::client::GetPosition(source, &pan, &tilt, &known);
+                    if (FAILED(hr)) return hr;
+                    return tourelle::client::PanTiltAbsolute(source, tourelle::core::ToMotorValue(target.pan),
+                                                             tourelle::core::ToMotorValue(target.tilt));
+                }),
+                false);
+    if (!known) SetStatus(T().findingCenter);  // the source recenters first: a few seconds
+}
+
+void SavePreset(int index) {
+    if (index < 0 || index >= kPresetCount) return;
+    tourelle::core::PanTilt current;
+    bool known = false;
+    if (g.demo) {
+        std::lock_guard guard(g.lock);
+        current = g.demoPosition;
+        known = true;
+    } else {
+        const HRESULT hr = WithSource([&](IUnknown* source) {
+            int16_t pan = 0, tilt = 0;
+            const HRESULT result = tourelle::client::GetPosition(source, &pan, &tilt, &known);
+            current = {pan, tilt};
+            return result;
+        });
+        if (FAILED(hr)) {
+            ReportMotor(hr, false);
+            return;
+        }
+    }
+    if (!known) {
+        // The head has not been recentered since the camera source started: positions
+        // would be meaningless. Recenter now; the user can save again afterwards.
+        SetStatus(T().findingCenter);
+        Recenter();
+        return;
+    }
+    g.presetSet[index] = true;
+    g.presetPosition[index] = current;
+    SavePresetSetting(index);
+    InvalidateRect(g.presets[index], nullptr, FALSE);
+    wchar_t text[128];
+    swprintf_s(text, T().presetSaved, index + 1);
+    SetStatus(text);
+}
+
+// Focus ------------------------------------------------------------------------
+
+void SetFocusValue(int value) {
+    g.focus = std::clamp(value, tourelle::core::kFocusMin, tourelle::core::kFocusMax);
+    if (g.demo) return;
+    const auto focus = static_cast<uint8_t>(g.focus);
+    ReportMotor(WithSource([focus](IUnknown* source) { return tourelle::client::SetFocus(source, focus); }), false);
+}
+
+// Contrast autofocus on the preview: coarse then fine sweep of the focus motor.
+void Autofocus() {
+    if (!g.setup.Ready() || g.autofocusing.exchange(true)) return;
+    SetStatus(T().focusing);
+    std::thread([] {
+        CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+        const auto setFocus = [](int position) {
+            if (g.demo) return;
+            WithSource([position](IUnknown* source) {
+                return tourelle::client::SetFocus(source, static_cast<uint8_t>(position));
+            });
+        };
+        tourelle::core::AutofocusSearch search(tourelle::core::kFocusMin, tourelle::core::kFocusMax, 32, 8);
+        while (auto position = search.Next()) {
+            setFocus(*position);
+            Sleep(550);  // motor travel, then a few fresh frames
+            double sharpness = 0;
+            {
+                std::lock_guard guard(g.lock);
+                if (!g.frame.empty()) sharpness = tourelle::core::Sharpness(g.frame.data(), g.width, g.height, 4, 1);
+            }
+            search.Record(sharpness);
+        }
+        g.focus = search.Best();
+        setFocus(g.focus);
+        PostStatus(T().focusDone);
+        g.autofocusing = false;
+        CoUninitialize();
+    }).detach();
+}
+
+// Face tracking ------------------------------------------------------------------
+
+void FollowLoop(HANDLE stop) {
+    RoInitialize(RO_INIT_MULTITHREADED);
+    auto tracker = tourelle::app::FaceTracker::Create();
+    if (!tracker) {
+        PostStatus(T().followUnavailable);
+        PostMessageW(g.window, WM_APP_FOLLOW_OFF, 0, 0);
+        RoUninitialize();
+        return;
+    }
+    ULONGLONG lastMove = 0;
+    std::vector<BYTE> frame;
+    UINT width = 0, height = 0;
+    while (WaitForSingleObject(stop, 150) == WAIT_TIMEOUT) {
+        {
+            std::lock_guard guard(g.lock);
+            frame = g.frame;
+            width = g.width;
+            height = g.height;
+        }
+        if (frame.empty()) continue;
+        const auto faces = tracker->Detect(frame.data(), width, height);
+        const tourelle::app::FaceBox* best = nullptr;
+        for (const auto& face : faces) {
+            if (!best || face.width * face.height > best->width * best->height) best = &face;
+        }
+        {
+            std::lock_guard guard(g.lock);
+            g.faceTime = best ? GetTickCount64() : 0;
+            if (best) g.face = *best;
+        }
+        if (!best) continue;
+        // Recenter on the face when it drifts out of a central dead zone.
+        const double dx = best->x + best->width / 2 - width / 2.0;
+        const double dy = best->y + best->height / 2 - height / 2.0;
+        const ULONGLONG now = GetTickCount64();
+        if ((std::fabs(dx) > width * 0.08 || std::fabs(dy) > height * 0.10) && now - lastMove > 700) {
+            MoveUnits(tourelle::core::AimAt(dx * 0.6, dy * 0.6, width), true);
+            lastMove = now;
+        }
+    }
+    {
+        std::lock_guard guard(g.lock);
+        g.faceTime = 0;
+    }
+    RoUninitialize();
+}
+
+void StopFollowThread() {
+    if (!g.followThread.joinable()) return;
+    SetEvent(g.stopFollow);
+    if (WaitForSingleObject(g.followThread.native_handle(), 3000) == WAIT_OBJECT_0) {
+        g.followThread.join();
+        CloseHandle(g.stopFollow);
+    } else {
+        g.followThread.detach();
+    }
+    g.stopFollow = nullptr;
+}
+
+void SetFollowing(bool on) {
+    if (on == g.following.load()) return;
+    if (on) {
+        if (!g.setup.Ready()) return;
+        g.following = true;
+        StartVideo();  // tracking needs frames, even while the window is hidden
+        g.stopFollow = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        g.followThread = std::thread(FollowLoop, g.stopFollow);
+        SetStatus(T().followOn);
+    } else {
+        g.following = false;
+        StopFollowThread();
+        SetStatus(T().followOff);
+        if (!IsWindowVisible(g.window)) StopVideo();
+    }
+    InvalidateRect(g.follow, nullptr, FALSE);
+}
+
+// Global shortcuts and controller --------------------------------------------------
+
+constexpr UINT kHotkeyKeys[] = {VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_HOME, '1', '2', '3', '4', 'F'};
+
+void UnregisterHotkeys() {
+    for (int id = 1; id <= kHotkeyIds; ++id) UnregisterHotKey(g.window, id);
+}
+
+void RegisterHotkeys() {
+    UnregisterHotkeys();
+    if (!g.hotkeys) return;
+    bool failed = false;
+    for (int i = 0; i < static_cast<int>(std::size(kHotkeyKeys)); ++i) {
+        if (!RegisterHotKey(g.window, i + 1, MOD_CONTROL | MOD_ALT, kHotkeyKeys[i])) failed = true;
+    }
+    if (failed) SetStatus(T().hotkeysFailed);
+}
+
+void OnHotkey(int id) {
+    if (!g.setup.Ready()) return;
+    switch (id) {
+        case 1: Move(-1, 0); break;
+        case 2: Move(1, 0); break;
+        case 3: Move(0, 1); break;
+        case 4: Move(0, -1); break;
+        case 5: Move(0, 0); break;
+        case 6: case 7: case 8: case 9: GoToPreset(id - 6); break;
+        case 10: SetFollowing(!g.following); break;
+        default: break;
+    }
+}
+
+void PollGamepad() {
+    if (!g.gamepad || !g.pad360 || !g.setup.Ready()) return;
+    const auto state = g.pad360->Read();
+    if (!state.connected) {
+        g.padButtons = 0;
+        return;
+    }
+    const uint16_t pressed = state.buttons & ~g.padButtons;
+    g.padButtons = state.buttons;
+    if (pressed & XINPUT_GAMEPAD_A) Recenter();
+    if (pressed & XINPUT_GAMEPAD_B) SetFollowing(!g.following);
+    if (pressed & XINPUT_GAMEPAD_X) Autofocus();
+    const auto step = [](int pan, int tilt) {
+        g.lastMove = {};
+        Move(pan, tilt);
+    };
+    if (pressed & XINPUT_GAMEPAD_DPAD_LEFT) step(-1, 0);
+    if (pressed & XINPUT_GAMEPAD_DPAD_RIGHT) step(1, 0);
+    if (pressed & XINPUT_GAMEPAD_DPAD_UP) step(0, 1);
+    if (pressed & XINPUT_GAMEPAD_DPAD_DOWN) step(0, -1);
+
+    const ULONGLONG now = GetTickCount64();
+    if ((state.leftX != 0 || state.leftY != 0) && now - g.padLastMove >= 100) {
+        g.padLastMove = now;
+        const double maxUnits = 3.0 * kUnitsPerDegree;  // per 100 ms at full deflection
+        MoveUnits({static_cast<int>(std::lround(state.leftX * maxUnits * (g.invertPan ? -1 : 1))),
+                   static_cast<int>(std::lround(state.leftY * maxUnits * kTiltUp * (g.invertTilt ? -1 : 1)))});
+    }
+}
+
+// Diagnostics ----------------------------------------------------------------------
+
+void CopyDiagnostics() {
+    std::wstring text = L"Tourelle " TOURELLE_VERSION_WIDE L"\r\n";
+    using RtlGetVersionFn = LONG(WINAPI*)(PRTL_OSVERSIONINFOW);
+    RTL_OSVERSIONINFOW os{sizeof(os)};
+    if (auto get = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"))) {
+        get(&os);
+    }
+    text += L"Windows: " + std::to_wstring(os.dwMajorVersion) + L"." + std::to_wstring(os.dwMinorVersion) + L"." +
+            std::to_wstring(os.dwBuildNumber) + L"\r\n";
+    text += L"Language: " + std::wstring(T().code) + (g.demo ? L" (demo mode)" : L"") + L"\r\n";
+    text += L"Setup: camera=" + std::to_wstring(g.setup.cameraPresent) + L" winusb=" +
+            std::to_wstring(g.setup.winusbBound) + L" source=" + std::to_wstring(g.setup.sourceInstalled) +
+            L" vcam=" + std::to_wstring(g.setup.virtualCameraListed) + L"\r\n";
+    text += tourelle::setup::Describe();
+    if (!g.demo && g.setup.Ready()) {
+        int16_t pan = 0, tilt = 0;
+        bool known = false;
+        if (SUCCEEDED(WithSource([&](IUnknown* source) {
+                return tourelle::client::GetPosition(source, &pan, &tilt, &known);
+            }))) {
+            text += L"Position: " + (known ? std::to_wstring(pan) + L", " + std::to_wstring(tilt) : L"unknown") +
+                    L" (1/64 degree)\r\n";
+        }
+    }
+    text += L"Focus: " + std::to_wstring(g.focus.load()) + L", preview: " + std::to_wstring(g.fps) + L" fps\r\n";
+    text += L"Options: invertPan=" + std::to_wstring(g.invertPan) + L" invertTilt=" + std::to_wstring(g.invertTilt) +
+            L" hotkeys=" + std::to_wstring(g.hotkeys) + L" gamepad=" + std::to_wstring(g.gamepad) +
+            L" following=" + std::to_wstring(g.following.load()) + L"\r\n";
+    text += L"Last status: " + g.statusText + L"\r\n";
+
+    if (!OpenClipboard(g.window)) return;
+    EmptyClipboard();
+    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    if (HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+        if (void* target = GlobalLock(memory)) {
+            memcpy(target, text.c_str(), bytes);
+            GlobalUnlock(memory);
+            if (!SetClipboardData(CF_UNICODETEXT, memory)) GlobalFree(memory);
+        } else {
+            GlobalFree(memory);
+        }
+    }
+    CloseClipboard();
+    SetStatus(T().diagnosticsCopied);
 }
 
 void ShowAbout(int tab);
@@ -506,13 +928,15 @@ bool HandleKey(WPARAM key) {
         return false;
     }
     if (GetActiveWindow() != g.window || !g.setup.Ready()) return false;
+    if (GetKeyState(VK_CONTROL) < 0 || GetKeyState(VK_MENU) < 0) return false;  // leave shortcuts to Windows
     switch (key) {
         case VK_LEFT: Move(-1, 0); return true;
         case VK_RIGHT: Move(1, 0); return true;
         case VK_UP: Move(0, 1); return true;
         case VK_DOWN: Move(0, -1); return true;
         case VK_HOME: Move(0, 0); return true;
-        case '1': case '2': case '3': case '4': SelectStep(static_cast<int>(key - '1')); return true;
+        case '1': case '2': case '3': case '4': GoToPreset(static_cast<int>(key - '1')); return true;
+        case 'F': SetFollowing(!g.following); return true;
         default: return false;
     }
 }
@@ -520,16 +944,32 @@ bool HandleKey(WPARAM key) {
 // Setup ----------------------------------------------------------------------
 
 void RefreshSetup() {
-    g.setup = tourelle::setup::Query();
-    EnableWindow(g.install, !g.busy && !g.setup.Ready());
-    EnableWindow(g.uninstall, !g.busy && g.setup.AnythingInstalled());
-    for (HWND button : g.pad) EnableWindow(button, g.setup.Ready());
+    if (g.demo) {
+        g.setup = {true, true, true, true};
+    } else {
+        g.setup = tourelle::setup::Query();
+    }
+    const bool ready = g.setup.Ready();
+    EnableWindow(g.install, !g.busy && !ready && !g.demo);
+    EnableWindow(g.uninstall, !g.busy && g.setup.AnythingInstalled() && !g.demo);
+    for (HWND button : g.pad) EnableWindow(button, ready);
+    for (HWND button : g.presets) EnableWindow(button, ready);
+    for (HWND button : g.focusButtons) EnableWindow(button, ready);
+    EnableWindow(g.follow, ready);
     RECT card = Scale(kSetupCard);
     InvalidateRect(g.window, &card, FALSE);
 
-    if (g.setup.Ready()) {
-        if (IsWindowVisible(g.window)) StartVideo();  // no preview while hidden in the notification area
+    if (ready) {
+        // No preview while hidden in the notification area, unless face tracking needs it.
+        if (IsWindowVisible(g.window) || g.following) StartVideo();
+        if (!g.demo) {
+            uint8_t focus = 0;
+            if (SUCCEEDED(WithSource([&](IUnknown* source) { return tourelle::client::GetFocus(source, &focus); }))) {
+                g.focus = focus;
+            }
+        }
     } else {
+        SetFollowing(false);
         StopVideo();
         SetVideoMessage(g.setup.cameraPresent ? T().clickInstall : T().connectThenInstall);
     }
@@ -656,7 +1096,9 @@ void ShowMain() {
 }
 
 void HideMain() {
-    StopVideo();  // free the camera and the CPU while nobody looks at the preview
+    // Free the camera and the CPU while nobody looks at the preview, unless face
+    // tracking needs the frames.
+    if (!g.following) StopVideo();
     ShowWindow(g.window, SW_HIDE);
     if (!g.trayHintShown) {
         g.trayHintShown = true;
@@ -698,9 +1140,14 @@ void ShowTrayMenu(int x, int y) {
 
 // Owner-drawn buttons ---------------------------------------------------------
 
+bool IsPreset(int id) { return id >= IdPreset0 && id < IdPreset0 + kPresetCount; }
+
 ButtonKind KindOf(int id) {
     if (id >= IdUp && id <= IdCenter) return ButtonKind::Pad;
-    if ((id >= IdStep0 && id < IdStep0 + 4) || (id >= IdTab0 && id < IdTab0 + 3)) return ButtonKind::Pill;
+    if ((id >= IdStep0 && id < IdStep0 + 4) || (id >= IdTab0 && id < IdTab0 + 3) || IsPreset(id) ||
+        (id >= IdFocusFar && id <= IdFocusNear) || id == IdFollow) {
+        return ButtonKind::Pill;
+    }
     if (id == IdInstall || id == IdClose) return ButtonKind::Primary;
     if (id == IdMenu) return ButtonKind::Icon;
     return ButtonKind::Secondary;
@@ -721,12 +1168,17 @@ const wchar_t* GlyphOf(int id) {
 bool IsSelected(int id) {
     if (id >= IdStep0 && id < IdStep0 + 4) return id - IdStep0 == g.stepIndex;
     if (id >= IdTab0 && id < IdTab0 + 3) return id - IdTab0 == g.aboutTab;
+    if (id == IdFollow) return g.following;
+    if (id == IdAutofocus) return g.autofocusing;
     return false;
 }
 
+// Saved presets read brighter than empty ones.
+bool IsEmphasized(int id) { return IsPreset(id) && g.presetSet[id - IdPreset0]; }
+
 // Buttons sit on a card (Panel) or directly on the window background.
 COLORREF BackdropOf(int id) {
-    return (id >= IdUp && id < IdMenu) ? theme::Panel : theme::Background;
+    return (id >= IdUp && id < IdMenuAbout && id != IdMenu) ? theme::Panel : theme::Background;
 }
 
 void DrawButton(const DRAWITEMSTRUCT& item) {
@@ -762,10 +1214,13 @@ void DrawButton(const DRAWITEMSTRUCT& item) {
             }
             case ButtonKind::Pill: {
                 const bool selected = IsSelected(id);
+                const bool emphasized = IsEmphasized(id);
                 const COLORREF fill = selected ? theme::Accent : hover || pressed ? theme::ButtonHover : theme::Button;
-                FillRounded(graphics, box, box.Height / 2, fill, alpha);
-                DrawText(graphics, label, L"Segoe UI", 13, selected ? Gdiplus::FontStyleBold : Gdiplus::FontStyleRegular,
-                         box, selected ? theme::Background : hover ? theme::Text : theme::Muted,
+                const COLORREF border = theme::Accent;
+                FillRounded(graphics, box, box.Height / 2, fill, alpha, emphasized && !selected ? &border : nullptr);
+                DrawText(graphics, label, L"Segoe UI", 13,
+                         selected || emphasized ? Gdiplus::FontStyleBold : Gdiplus::FontStyleRegular, box,
+                         selected ? theme::Background : hover || emphasized ? theme::Text : theme::Muted,
                          Gdiplus::StringAlignmentCenter, Gdiplus::StringAlignmentCenter, alpha);
                 break;
             }
@@ -822,6 +1277,11 @@ LRESULT CALLBACK HoverProc(HWND button, UINT message, WPARAM wParam, LPARAM lPar
             break;
         case WM_ERASEBKGND:
             return 1;
+        case WM_RBUTTONUP: {
+            const int id = GetDlgCtrlID(button);
+            if (IsPreset(id)) PostMessageW(GetParent(button), WM_APP_PRESET_SAVE, id - IdPreset0, 0);
+            break;
+        }
         default:
             break;
     }
@@ -858,6 +1318,8 @@ void PaintMain(HDC target, const RECT& area) {
         DrawText(graphics, L"Tourelle", L"Segoe UI", 30, Gdiplus::FontStyleBold, R(22, 14, 300, 44), theme::Text);
         DrawText(graphics, T().subtitle, L"Segoe UI", 14, Gdiplus::FontStyleRegular,
                  R(24, 54, 600, 22), theme::Muted);
+        DrawText(graphics, std::wstring(L"v" TOURELLE_VERSION_WIDE) + (g.demo ? L" · DEMO" : L""), L"Segoe UI", 12,
+                 Gdiplus::FontStyleRegular, R(760, 36, 200, 20), g.demo ? theme::Accent : theme::Muted, Far, Near);
 
         // Video frame
         const COLORREF line = theme::Line;
@@ -865,14 +1327,17 @@ void PaintMain(HDC target, const RECT& area) {
 
         // Move card
         FillRounded(graphics, RectF(Scale(kMoveCard)), ScaleF(14), theme::Panel, 255, &line);
-        DrawText(graphics, T().move, L"Segoe UI", 12, Gdiplus::FontStyleBold, R(788, 98, 200, 18), theme::Accent);
-        DrawText(graphics, T().step, L"Segoe UI", 12, Gdiplus::FontStyleBold, R(788, 348, 200, 18), theme::Accent);
-        DrawText(graphics, T().hint, L"Segoe UI", 12,
-                 Gdiplus::FontStyleRegular, R(788, 404, 220, 40), theme::Muted);
+        const auto label = [&](const wchar_t* text, float y) {
+            DrawText(graphics, text, L"Segoe UI", 12, Gdiplus::FontStyleBold, R(788, y, 208, 18), theme::Accent);
+        };
+        label(T().move, 98);
+        label(T().step, 318);
+        label(T().focus, 380);
+        label(T().presets, 442);
 
         // Setup card
         FillRounded(graphics, RectF(Scale(kSetupCard)), ScaleF(14), theme::Panel, 255, &line);
-        DrawText(graphics, T().setup, L"Segoe UI", 12, Gdiplus::FontStyleBold, R(788, 478, 200, 18), theme::Accent);
+        DrawText(graphics, T().setup, L"Segoe UI", 12, Gdiplus::FontStyleBold, R(788, 588, 200, 18), theme::Accent);
         const struct {
             bool ok;
             const wchar_t* yes;
@@ -884,22 +1349,33 @@ void PaintMain(HDC target, const RECT& area) {
             {g.setup.virtualCameraListed, T().virtualCameraYes, T().virtualCameraNo},
         };
         for (int i = 0; i < 4; ++i) {
-            const float y = 502.0f + 19.0f * static_cast<float>(i);
+            const float y = 610.0f + 18.0f * static_cast<float>(i);
             Gdiplus::SolidBrush dot(Color(lines[i].ok ? theme::Ok : theme::Bad));
             graphics.FillEllipse(&dot, R(790, y + 5, 8, 8));
-            DrawText(graphics, lines[i].ok ? lines[i].yes : lines[i].no, L"Segoe UI", 13, Gdiplus::FontStyleRegular,
-                     R(806, y, 200, 19), lines[i].ok ? theme::Text : theme::Muted);
+            DrawText(graphics, lines[i].ok ? lines[i].yes : lines[i].no, L"Segoe UI", 12, Gdiplus::FontStyleRegular,
+                     R(806, y, 200, 18), lines[i].ok ? theme::Text : theme::Muted);
         }
 
-        // Status line
-        DrawText(graphics, g.statusText, L"Segoe UI", 13, Gdiplus::FontStyleRegular, R(24, 636, 760, 22), theme::Muted);
-        DrawText(graphics, L"v" TOURELLE_VERSION_WIDE L" · MIT", L"Segoe UI", 13, Gdiplus::FontStyleRegular,
-                 R(816, 636, 200, 22), theme::Muted, Far, Near);
+        // Status line and keyboard hint, under the video
+        DrawText(graphics, g.statusText, L"Segoe UI", 13, Gdiplus::FontStyleRegular, R(24, 636, 720, 22), theme::Text);
+        DrawText(graphics, T().hint, L"Segoe UI", 12, Gdiplus::FontStyleRegular, R(24, 664, 720, 44), theme::Muted);
     }
     BitBlt(target, 0, 0, area.right, area.bottom, dc, 0, 0, SRCCOPY);
     SelectObject(dc, old);
     DeleteObject(bitmap);
     DeleteDC(dc);
+}
+
+// Where the frame lands in the video area (letterboxed, aspect ratio kept). Under g.lock.
+RECT FrameRect(const RECT& area) {
+    const int width = area.right, height = area.bottom;
+    int drawWidth = width, drawHeight = MulDiv(width, static_cast<int>(g.height), static_cast<int>(g.width));
+    if (drawHeight > height) {
+        drawHeight = height;
+        drawWidth = MulDiv(height, static_cast<int>(g.width), static_cast<int>(g.height));
+    }
+    const int left = (width - drawWidth) / 2, top = (height - drawHeight) / 2;
+    return RECT{left, top, left + drawWidth, top + drawHeight};
 }
 
 void PaintVideo(HDC target, const RECT& area) {
@@ -913,13 +1389,10 @@ void PaintVideo(HDC target, const RECT& area) {
         FillRect(dc, &area, background);
         DeleteObject(background);
         const bool live = !g.frame.empty() && g.width && g.height;
+        RECT frame{};
         if (live) {
-            // Letterbox, keep the aspect ratio.
-            int drawWidth = width, drawHeight = MulDiv(width, static_cast<int>(g.height), static_cast<int>(g.width));
-            if (drawHeight > height) {
-                drawHeight = height;
-                drawWidth = MulDiv(height, static_cast<int>(g.width), static_cast<int>(g.height));
-            }
+            frame = FrameRect(area);
+            const int drawWidth = frame.right - frame.left, drawHeight = frame.bottom - frame.top;
             BITMAPINFO info{};
             info.bmiHeader.biSize = sizeof(info.bmiHeader);
             info.bmiHeader.biWidth = static_cast<LONG>(g.width);
@@ -929,12 +1402,23 @@ void PaintVideo(HDC target, const RECT& area) {
             info.bmiHeader.biCompression = BI_RGB;
             SetStretchBltMode(dc, HALFTONE);
             SetBrushOrgEx(dc, 0, 0, nullptr);
-            StretchDIBits(dc, (width - drawWidth) / 2, (height - drawHeight) / 2, drawWidth, drawHeight, 0, 0,
-                          static_cast<int>(g.width), static_cast<int>(g.height), g.frame.data(), &info, DIB_RGB_COLORS,
-                          SRCCOPY);
+            StretchDIBits(dc, frame.left, frame.top, drawWidth, drawHeight, 0, 0, static_cast<int>(g.width),
+                          static_cast<int>(g.height), g.frame.data(), &info, DIB_RGB_COLORS, SRCCOPY);
         }
         Gdiplus::Graphics graphics(dc);
         PrepareGraphics(graphics);
+        if (live && g.following && g.faceTime && GetTickCount64() - g.faceTime < 1000) {
+            // The face being followed.
+            const float sx = static_cast<float>(frame.right - frame.left) / static_cast<float>(g.width);
+            const float sy = static_cast<float>(frame.bottom - frame.top) / static_cast<float>(g.height);
+            Gdiplus::Pen pen(Color(theme::Accent), ScaleF(2));
+            Gdiplus::GraphicsPath path;
+            RoundedPath(path,
+                        Gdiplus::RectF(frame.left + g.face.x * sx, frame.top + g.face.y * sy, g.face.width * sx,
+                                       g.face.height * sy),
+                        ScaleF(8));
+            graphics.DrawPath(&pen, &path);
+        }
         if (live) {
             const Gdiplus::RectF pill(ScaleF(14), ScaleF(14), ScaleF(118), ScaleF(30));
             FillRounded(graphics, pill, pill.Height / 2, RGB(0, 0, 0), 150);
@@ -967,9 +1451,36 @@ LRESULT CALLBACK VideoProc(HWND window, UINT message, WPARAM wParam, LPARAM lPar
             EndPaint(window, &paint);
             return 0;
         }
+        case WM_SETCURSOR: {
+            std::lock_guard guard(g.lock);
+            const bool live = !g.frame.empty() && g.setup.Ready();
+            SetCursor(LoadCursorW(nullptr, live ? IDC_CROSS : IDC_ARROW));
+            return TRUE;
+        }
+        case WM_LBUTTONDOWN: {
+            // Click to aim: bring the clicked point to the center of the image.
+            RECT area;
+            GetClientRect(window, &area);
+            tourelle::core::PanTilt delta{};
+            {
+                std::lock_guard guard(g.lock);
+                if (g.frame.empty() || !g.width || !g.height || !g.setup.Ready()) break;
+                const RECT frame = FrameRect(area);
+                const int x = GET_X_LPARAM(lParam), y = GET_Y_LPARAM(lParam);
+                if (x < frame.left || x >= frame.right || y < frame.top || y >= frame.bottom) break;
+                const double scale = static_cast<double>(g.width) / (frame.right - frame.left);
+                const double dx = (x - (frame.left + frame.right) / 2.0) * scale;
+                const double dy = (y - (frame.top + frame.bottom) / 2.0) * scale;
+                delta = tourelle::core::AimAt(dx, dy, g.width);
+            }
+            MoveUnits(delta);
+            SetFocus(GetParent(window));  // keep the arrow keys on the camera
+            return 0;
+        }
         default:
-            return DefWindowProcW(window, message, wParam, lParam);
+            break;
     }
+    return DefWindowProcW(window, message, wParam, lParam);
 }
 
 // Menu -----------------------------------------------------------------------
@@ -987,6 +1498,13 @@ void ShowMenu() {
     AppendMenuW(menu, MF_STRING | (g.setup.Ready() ? 0 : MF_GRAYED), IdMenuRecenter, recenter.c_str());
     AppendMenuW(menu, MF_STRING | (g.invertPan ? MF_CHECKED : 0), IdMenuInvertPan, T().menuInvertPan);
     AppendMenuW(menu, MF_STRING | (g.invertTilt ? MF_CHECKED : 0), IdMenuInvertTilt, T().menuInvertTilt);
+    const std::wstring follow = std::wstring(T().followFace) + L"\tF";
+    AppendMenuW(menu, MF_STRING | (g.following ? MF_CHECKED : 0) | (g.setup.Ready() ? 0 : MF_GRAYED), IdMenuFollow,
+                follow.c_str());
+    AppendMenuW(menu, MF_STRING | (g.hotkeys ? MF_CHECKED : 0), IdMenuHotkeys, T().menuHotkeys);
+    AppendMenuW(menu, MF_STRING | (g.gamepad ? MF_CHECKED : 0) | (g.pad360 && g.pad360->Available() ? 0 : MF_GRAYED),
+                IdMenuGamepad, T().menuGamepad);
+    AppendMenuW(menu, MF_STRING | (g.demo ? MF_GRAYED : 0), IdMenuImageSettings, T().menuImageSettings);
     HMENU languages = CreatePopupMenu();
     for (int i = 0; i < kLanguageCount; ++i) {
         AppendMenuW(languages, MF_STRING | (i == g.language ? MF_CHECKED : 0), IdMenuLanguage0 + i,
@@ -999,6 +1517,7 @@ void ShowMenu() {
                 T().uninstall);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (IsAutostart() ? MF_CHECKED : 0), IdMenuAutostart, T().menuAutostart);
+    AppendMenuW(menu, MF_STRING, IdMenuDiagnostics, T().menuDiagnostics);
     AppendMenuW(menu, MF_STRING, IdMenuQuit, T().menuQuit);
 
     RECT button;
@@ -1024,6 +1543,18 @@ void ShowMenu() {
             g.invertTilt = !g.invertTilt;
             WriteSetting(L"InvertTilt", g.invertTilt);
             break;
+        case IdMenuFollow: SetFollowing(!g.following); break;
+        case IdMenuHotkeys:
+            g.hotkeys = !g.hotkeys;
+            WriteSetting(L"Hotkeys", g.hotkeys);
+            RegisterHotkeys();
+            break;
+        case IdMenuGamepad:
+            g.gamepad = !g.gamepad;
+            WriteSetting(L"Gamepad", g.gamepad);
+            break;
+        case IdMenuImageSettings: OpenUrl(L"ms-settings:camera"); break;
+        case IdMenuDiagnostics: CopyDiagnostics(); break;
         case IdMenuQuit: Quit(); break;
         default:
             if (command >= IdMenuLanguage0 && command < IdMenuLanguage0 + kLanguageCount) {
@@ -1179,19 +1710,28 @@ void CreateControls() {
     g.menu = MakeButton(g.window, IdMenu, L"Menu", 972, 22, 44, 44);
 
     // D-pad, centered in the move card.
-    const int size = 64, gap = 10, center = (kMoveCard.left + kMoveCard.right) / 2 - size / 2, top = 124;
+    const int size = 56, gap = 8, center = (kMoveCard.left + kMoveCard.right) / 2 - size / 2, top = 120;
     g.pad[0] = MakeButton(g.window, IdUp, L"Up", center, top, size, size);
     g.pad[1] = MakeButton(g.window, IdLeft, L"Left", center - size - gap, top + size + gap, size, size);
     g.pad[2] = MakeButton(g.window, IdCenter, L"Center", center, top + size + gap, size, size);
     g.pad[3] = MakeButton(g.window, IdRight, L"Right", center + size + gap, top + size + gap, size, size);
     g.pad[4] = MakeButton(g.window, IdDown, L"Down", center, top + 2 * (size + gap), size, size);
 
+    // Rows of pills, 208 px wide inside the card.
     for (int i = 0; i < 4; ++i) {
         g.steps[i] = MakeButton(g.window, IdStep0 + i, (std::to_wstring(kStepDegrees[i]) + L"°").c_str(), 788 + i * 54,
-                                370, 48, 30);
+                                338, 46, 28);
     }
-    g.install = MakeButton(g.window, IdInstall, T().install, 788, 584, 100, 30);
-    g.uninstall = MakeButton(g.window, IdUninstall, T().uninstall, 896, 584, 100, 30);
+    g.focusButtons[0] = MakeButton(g.window, IdFocusFar, L"−", 788, 400, 48, 28);
+    g.focusButtons[1] = MakeButton(g.window, IdAutofocus, L"AF", 844, 400, 96, 28);
+    g.focusButtons[2] = MakeButton(g.window, IdFocusNear, L"+", 948, 400, 48, 28);
+    for (int i = 0; i < kPresetCount; ++i) {
+        g.presets[i] = MakeButton(g.window, IdPreset0 + i, std::to_wstring(i + 1).c_str(), 788 + i * 54, 462, 46, 28);
+    }
+    g.follow = MakeButton(g.window, IdFollow, T().followFace, 788, 508, 208, 32);
+
+    g.install = MakeButton(g.window, IdInstall, T().install, 788, 688, 100, 28);
+    g.uninstall = MakeButton(g.window, IdUninstall, T().uninstall, 896, 688, 100, 28);
 }
 
 void SetLanguage(int language) {
@@ -1200,6 +1740,7 @@ void SetLanguage(int language) {
     CloseAbout();  // reopens in the new language next time
     SetWindowTextW(g.install, T().install);
     SetWindowTextW(g.uninstall, T().uninstall);
+    SetWindowTextW(g.follow, T().followFace);
     UpdateTrayTip();
     g.statusText.clear();
     RedrawWindow(g.window, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN);
@@ -1214,7 +1755,24 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             CreateControls();
             AddTrayIcon();
             SetTimer(window, kFpsTimer, 1000, nullptr);
+            SetTimer(window, kGamepadTimer, 50, nullptr);
+            RegisterHotkeys();
             RefreshSetup();
+            return 0;
+        case WM_HOTKEY:
+            OnHotkey(static_cast<int>(wParam));
+            return 0;
+        case WM_APP_STATUS: {
+            std::unique_ptr<std::wstring> text(reinterpret_cast<std::wstring*>(lParam));
+            if (text) SetStatus(*text);
+            InvalidateRect(g.focusButtons[1], nullptr, FALSE);  // autofocus state may have changed
+            return 0;
+        }
+        case WM_APP_PRESET_SAVE:
+            if (g.setup.Ready()) SavePreset(static_cast<int>(wParam));
+            return 0;
+        case WM_APP_FOLLOW_OFF:
+            SetFollowing(false);
             return 0;
         case WM_APP_TRAY:  // NOTIFYICON_VERSION_4: event in LOWORD(lParam), anchor point in wParam
             switch (LOWORD(lParam)) {
@@ -1258,8 +1816,16 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 case IdInstall: StartSetup(true); break;
                 case IdUninstall: StartSetup(false); break;
                 case IdMenu: ShowMenu(); break;
+                case IdFocusFar: SetFocusValue(g.focus - kFocusStep); break;
+                case IdFocusNear: SetFocusValue(g.focus + kFocusStep); break;
+                case IdAutofocus:
+                    Autofocus();
+                    InvalidateRect(g.focusButtons[1], nullptr, FALSE);
+                    break;
+                case IdFollow: SetFollowing(!g.following); break;
                 default:
                     if (id >= IdStep0 && id < IdStep0 + 4) SelectStep(id - IdStep0);
+                    if (IsPreset(id)) GoToPreset(id - IdPreset0);
                     break;
             }
             SetFocus(window);  // keep the arrow keys on the camera
@@ -1271,6 +1837,8 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             } else if (wParam == kRefreshTimer) {
                 KillTimer(window, kRefreshTimer);
                 if (!g.busy) RefreshSetup();
+            } else if (wParam == kGamepadTimer) {
+                PollGamepad();
             }
             return 0;
         case WM_APP_FRAME:
@@ -1288,7 +1856,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
                 HideMain();  // the close button sends Tourelle to the notification area
                 return 0;
             }
+            SetFollowing(false);
             StopVideo();
+            UnregisterHotkeys();
             DestroyWindow(window);
             return 0;
         case WM_QUERYENDSESSION:
@@ -1325,8 +1895,10 @@ HFONT MakeFont(const wchar_t* face, int points) {
                        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, face);
 }
 
-int RunApp(HINSTANCE instance, int show, bool trayOnly) {
+int RunApp(HINSTANCE instance, int show, bool trayOnly, bool demo) {
     g.instance = instance;
+    g.demo = demo;
+    g.pad360 = std::make_unique<tourelle::app::Gamepad>();
     g.taskbarCreated = RegisterWindowMessageW(L"TaskbarCreated");
     LoadSettings();
     g.message = T().starting;
@@ -1408,6 +1980,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
         result = RunAdminTask(false);
     } else {
         const bool trayOnly = argc > 1 && _wcsicmp(argv[1], L"--tray") == 0;
+        const bool demo = argc > 1 && _wcsicmp(argv[1], L"--demo") == 0;
         // One instance: a second launch just brings the running one forward.
         HANDLE single = CreateMutexW(nullptr, TRUE, L"Local\\Tourelle.App");
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
@@ -1417,7 +1990,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show) {
             }
             result = 0;
         } else {
-            result = RunApp(instance, show, trayOnly);
+            result = RunApp(instance, show, trayOnly, demo);
         }
         if (single) CloseHandle(single);
     }

@@ -23,6 +23,10 @@ struct Status {
 // Needs COM and Media Foundation started on the calling thread.
 Status Query();
 
+// Technical details for bug reports: device ids, drivers, installed files, services.
+// Contains no personal data (no user name, no paths under the user profile).
+std::wstring Describe();
+
 // Administrator half; run inside the elevated process. Throw std::exception on failure.
 void InstallElevated(const std::wstring& sourceDll);
 void UninstallElevated();

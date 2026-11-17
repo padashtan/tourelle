@@ -7,9 +7,17 @@
 #include <wrl/client.h>
 #include <wrl/implements.h>
 
+#include <condition_variable>
+#include <deque>
+#include <functional>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <thread>
 
+#include "KsControls.h"
+#include "Motor.h"
+#include "MotorService.h"
 #include "TourelleStream.h"
 #include "UvcDevice.h"
 
@@ -17,7 +25,10 @@ namespace tourelle {
 
 // Media source behind the "Tourelle Camera" virtual camera. Runs inside the
 // Windows Camera Frame Server, owns the WinUSB camera while streaming, and
-// accepts pan/tilt commands through IKsControl (PROPSETID_TourelleMotor).
+// accepts commands through IKsControl:
+//  - PROPSETID_TourelleMotor (relative/absolute pan-tilt, recenter, focus);
+//  - PROPSETID_VIDCAP_CAMERACONTROL pan, tilt, focus (standard, used by Windows and apps);
+//  - PROPSETID_VIDCAP_VIDEOPROCAMP image settings, passed to the camera's processing unit.
 class TourelleSource
     : public Microsoft::WRL::RuntimeClass<
           Microsoft::WRL::RuntimeClassFlags<Microsoft::WRL::ClassicCom>,
@@ -66,9 +77,12 @@ public:
 
 private:
     HRESULT CreateSourceAttributes();
-    HRESULT StartCamera();
+    HRESULT StartCamera(const TourelleStream::VideoMode& mode);
     void StopCamera();
-    HRESULT MotorCommand(ULONG id, const BYTE* data, ULONG length);
+
+    HRESULT MotorProperty(ULONG id, ULONG flags, void* data, ULONG length, ULONG* returned);
+    HRESULT CameraControlProperty(ULONG id, ULONG flags, void* data, ULONG length, ULONG* returned);
+    HRESULT ProcAmpProperty(ULONG id, ULONG flags, void* data, ULONG length, ULONG* returned);
 
     // The Frame Server may keep the source started with no client left. The
     // camera is closed after a few idle seconds (its LED goes off) and reopened
@@ -77,18 +91,20 @@ private:
     void StopIfIdle();
     void Wake();
     void CloseIdleTimer();
-    PTP_TIMER idleTimer_ = nullptr;
-    bool streaming_ = false;  // between Start and Stop
 
     std::recursive_mutex lock_;
     bool shutdown_ = false;
-    bool started_ = false;   // MENewStream already sent once
+    bool started_ = false;    // MENewStream already sent once
+    bool streaming_ = false;  // between Start and Stop
     bool mfStarted_ = false;
+    ULONGLONG lastStartAttempt_ = 0;
     Microsoft::WRL::ComPtr<IMFMediaEventQueue> queue_;
     Microsoft::WRL::ComPtr<IMFAttributes> attributes_;
     Microsoft::WRL::ComPtr<IMFPresentationDescriptor> descriptor_;
     Microsoft::WRL::ComPtr<TourelleStream> stream_;
     std::unique_ptr<UvcDevice> camera_;  // open only while streaming
+    PTP_TIMER idleTimer_ = nullptr;
+    std::map<ULONG, core::LongRange> procAmpRanges_;  // cached GET_MIN/MAX/RES/DEF, used under the CameraHub lock
 };
 
 }  // namespace tourelle

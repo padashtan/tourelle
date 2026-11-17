@@ -80,6 +80,25 @@ struct Texts {
     const wchar_t* aboutText;
     const wchar_t* licenseNote;  // shown above the MIT text, which stays in English
     const wchar_t* noticesText;
+
+    // Focus, presets, tracking, shortcuts
+    const wchar_t* focus;
+    const wchar_t* presets;
+    const wchar_t* followFace;
+    const wchar_t* presetSaved;  // %d = preset number
+    const wchar_t* presetEmpty;
+    const wchar_t* findingCenter;
+    const wchar_t* focusing;
+    const wchar_t* focusDone;
+    const wchar_t* followOn;
+    const wchar_t* followOff;
+    const wchar_t* followUnavailable;
+    const wchar_t* menuHotkeys;
+    const wchar_t* menuGamepad;
+    const wchar_t* menuDiagnostics;
+    const wchar_t* menuImageSettings;
+    const wchar_t* diagnosticsCopied;
+    const wchar_t* hotkeysFailed;
 };
 
 inline constexpr Texts kEnglish{
@@ -89,7 +108,7 @@ inline constexpr Texts kEnglish{
     .move = L"MOVE",
     .step = L"STEP",
     .setup = L"SETUP",
-    .hint = L"Arrow keys move · Home recenters\n1–4 pick the step",
+    .hint = L"Arrows: move · Home: recenter · click the image to aim\n1–4: go to a position, right-click a position to save it",
     .cameraYes = L"Camera connected",
     .cameraNo = L"Camera not connected",
     .driverYes = L"Driver: Tourelle (WinUSB)",
@@ -156,7 +175,10 @@ inline constexpr Texts kEnglish{
         L"KEYBOARD\r\n"
         L"Arrow keys: move the head\r\n"
         L"Home: recenter\r\n"
-        L"1 to 4: step of 2°, 5°, 10° or 20°\r\n",
+        L"1 to 4: go to a saved position (right-click a position button to save)\r\n"
+        L"Click the image: aim at that point\r\n"
+        L"Ctrl+Alt+arrows, Ctrl+Alt+Home, Ctrl+Alt+1 to 4: the same from any app\r\n"
+        L"Xbox controller: left stick moves, A recenters, B follows your face\r\n",
     .licenseNote = L"",
     .noticesText =
         L"TRADEMARKS\r\n"
@@ -175,6 +197,23 @@ inline constexpr Texts kEnglish{
         L"unit identifiers it uses also appear in the open-source libwebcam/uvcdynctrl mappings.\r\n\r\n"
         L"PRIVACY\r\n"
         L"Tourelle does not collect, store or send any data. The video never leaves your computer.\r\n",
+    .focus = L"FOCUS",
+    .presets = L"POSITIONS",
+    .followFace = L"Follow my face",
+    .presetSaved = L"Position %d saved.",
+    .presetEmpty = L"This position is empty: right-click it to save the current one.",
+    .findingCenter = L"Finding the center first (a few seconds)…",
+    .focusing = L"Focusing…",
+    .focusDone = L"Focus set.",
+    .followOn = L"Following your face.",
+    .followOff = L"Face following off.",
+    .followUnavailable = L"Face detection is not available on this PC.",
+    .menuHotkeys = L"Global shortcuts (Ctrl+Alt+arrows)",
+    .menuGamepad = L"Xbox controller",
+    .menuDiagnostics = L"Copy diagnostics",
+    .menuImageSettings = L"Image settings (Windows)…",
+    .diagnosticsCopied = L"Diagnostics copied to the clipboard.",
+    .hotkeysFailed = L"Some global shortcuts are already used by another app.",
 };
 
 inline constexpr Texts kFrench{
@@ -184,7 +223,7 @@ inline constexpr Texts kFrench{
     .move = L"DÉPLACER",
     .step = L"PAS",
     .setup = L"INSTALLATION",
-    .hint = L"Flèches : bouger · Début : recentrer\n1–4 : choisir le pas",
+    .hint = L"Flèches : bouger · Début : recentrer · cliquez l'image pour viser\n1–4 : aller à une position, clic droit dessus pour l'enregistrer",
     .cameraYes = L"Caméra connectée",
     .cameraNo = L"Caméra non connectée",
     .driverYes = L"Pilote : Tourelle (WinUSB)",
@@ -252,7 +291,10 @@ inline constexpr Texts kFrench{
         L"CLAVIER\r\n"
         L"Flèches : bouger la tête\r\n"
         L"Début : recentrer\r\n"
-        L"1 à 4 : pas de 2°, 5°, 10° ou 20°\r\n",
+        L"1 à 4 : aller à une position enregistrée (clic droit sur un bouton de position pour l'enregistrer)\r\n"
+        L"Clic sur l'image : viser ce point\r\n"
+        L"Ctrl+Alt+flèches, Ctrl+Alt+Début, Ctrl+Alt+1 à 4 : la même chose depuis n'importe quelle application\r\n"
+        L"Manette Xbox : stick gauche pour bouger, A recentre, B suit votre visage\r\n",
     .licenseNote = L"Le texte de la licence MIT fait foi en anglais.\r\n\r\n",
     .noticesText =
         L"MARQUES\r\n"
@@ -272,6 +314,23 @@ inline constexpr Texts kFrench{
         L"libwebcam/uvcdynctrl.\r\n\r\n"
         L"CONFIDENTIALITÉ\r\n"
         L"Tourelle ne collecte, ne stocke et n'envoie aucune donnée. La vidéo ne quitte jamais votre ordinateur.\r\n",
+    .focus = L"MISE AU POINT",
+    .presets = L"POSITIONS",
+    .followFace = L"Suivre mon visage",
+    .presetSaved = L"Position %d enregistrée.",
+    .presetEmpty = L"Position vide : clic droit dessus pour enregistrer la position actuelle.",
+    .findingCenter = L"Recherche du centre d'abord (quelques secondes)…",
+    .focusing = L"Mise au point…",
+    .focusDone = L"Mise au point réglée.",
+    .followOn = L"Suivi du visage activé.",
+    .followOff = L"Suivi du visage désactivé.",
+    .followUnavailable = L"La détection de visage n'est pas disponible sur ce PC.",
+    .menuHotkeys = L"Raccourcis globaux (Ctrl+Alt+flèches)",
+    .menuGamepad = L"Manette Xbox",
+    .menuDiagnostics = L"Copier le diagnostic",
+    .menuImageSettings = L"Réglages de l'image (Windows)…",
+    .diagnosticsCopied = L"Diagnostic copié dans le presse-papiers.",
+    .hotkeysFailed = L"Certains raccourcis globaux sont déjà pris par une autre application.",
 };
 
 inline constexpr Texts kSpanish{
@@ -281,7 +340,7 @@ inline constexpr Texts kSpanish{
     .move = L"MOVER",
     .step = L"PASO",
     .setup = L"INSTALACIÓN",
-    .hint = L"Flechas: mover · Inicio: centrar\n1–4: elegir el paso",
+    .hint = L"Flechas: mover · Inicio: centrar · haz clic en la imagen para apuntar\n1–4: ir a una posición, clic derecho para guardarla",
     .cameraYes = L"Cámara conectada",
     .cameraNo = L"Cámara no conectada",
     .driverYes = L"Controlador: Tourelle (WinUSB)",
@@ -350,7 +409,10 @@ inline constexpr Texts kSpanish{
         L"TECLADO\r\n"
         L"Flechas: mover el cabezal\r\n"
         L"Inicio: centrar\r\n"
-        L"1 a 4: paso de 2°, 5°, 10° o 20°\r\n",
+        L"1 a 4: ir a una posición guardada (clic derecho en un botón de posición para guardarla)\r\n"
+        L"Clic en la imagen: apuntar a ese punto\r\n"
+        L"Ctrl+Alt+flechas, Ctrl+Alt+Inicio, Ctrl+Alt+1 a 4: lo mismo desde cualquier aplicación\r\n"
+        L"Mando de Xbox: el stick izquierdo mueve, A centra, B sigue tu cara\r\n",
     .licenseNote = L"El texto de la licencia MIT es vinculante en inglés.\r\n\r\n",
     .noticesText =
         L"MARCAS\r\n"
@@ -369,6 +431,23 @@ inline constexpr Texts kSpanish{
         L"unidad de extensión que usa también aparecen en las asignaciones libres de libwebcam/uvcdynctrl.\r\n\r\n"
         L"PRIVACIDAD\r\n"
         L"Tourelle no recopila, almacena ni envía ningún dato. El vídeo nunca sale de tu ordenador.\r\n",
+    .focus = L"ENFOQUE",
+    .presets = L"POSICIONES",
+    .followFace = L"Seguir mi cara",
+    .presetSaved = L"Posición %d guardada.",
+    .presetEmpty = L"Posición vacía: haz clic derecho para guardar la actual.",
+    .findingCenter = L"Buscando primero el centro (unos segundos)…",
+    .focusing = L"Enfocando…",
+    .focusDone = L"Enfoque ajustado.",
+    .followOn = L"Siguiendo tu cara.",
+    .followOff = L"Seguimiento de cara desactivado.",
+    .followUnavailable = L"La detección de caras no está disponible en este PC.",
+    .menuHotkeys = L"Atajos globales (Ctrl+Alt+flechas)",
+    .menuGamepad = L"Mando de Xbox",
+    .menuDiagnostics = L"Copiar diagnóstico",
+    .menuImageSettings = L"Ajustes de imagen (Windows)…",
+    .diagnosticsCopied = L"Diagnóstico copiado al portapapeles.",
+    .hotkeysFailed = L"Otra aplicación ya usa algunos atajos globales.",
 };
 
 inline constexpr Texts kPolish{
@@ -378,7 +457,7 @@ inline constexpr Texts kPolish{
     .move = L"RUCH",
     .step = L"KROK",
     .setup = L"INSTALACJA",
-    .hint = L"Strzałki: ruch · Home: wyśrodkuj\n1–4: wybór kroku",
+    .hint = L"Strzałki: ruch · Home: wyśrodkuj · kliknij obraz, aby wycelować\n1–4: przejdź do pozycji, prawy przycisk: zapisz ją",
     .cameraYes = L"Kamera podłączona",
     .cameraNo = L"Kamera niepodłączona",
     .driverYes = L"Sterownik: Tourelle (WinUSB)",
@@ -446,7 +525,10 @@ inline constexpr Texts kPolish{
         L"KLAWIATURA\r\n"
         L"Strzałki: ruch głowicy\r\n"
         L"Home: wyśrodkowanie\r\n"
-        L"1 do 4: krok 2°, 5°, 10° lub 20°\r\n",
+        L"1 do 4: przejście do zapisanej pozycji (prawy przycisk na przycisku pozycji: zapis)\r\n"
+        L"Kliknięcie obrazu: wycelowanie w ten punkt\r\n"
+        L"Ctrl+Alt+strzałki, Ctrl+Alt+Home, Ctrl+Alt+1 do 4: to samo z dowolnej aplikacji\r\n"
+        L"Kontroler Xbox: lewa gałka porusza, A wyśrodkowuje, B śledzi twarz\r\n",
     .licenseNote = L"Wiążący jest angielski tekst licencji MIT.\r\n\r\n",
     .noticesText =
         L"ZNAKI TOWAROWE\r\n"
@@ -469,6 +551,23 @@ inline constexpr Texts kPolish{
         L"PRYWATNOŚĆ\r\n"
         L"Tourelle nie zbiera, nie przechowuje ani nie wysyła żadnych danych. Obraz nigdy nie opuszcza Twojego "
         L"komputera.\r\n",
+    .focus = L"OSTROŚĆ",
+    .presets = L"POZYCJE",
+    .followFace = L"Śledź moją twarz",
+    .presetSaved = L"Zapisano pozycję %d.",
+    .presetEmpty = L"Pusta pozycja: kliknij ją prawym przyciskiem, aby zapisać bieżącą.",
+    .findingCenter = L"Najpierw wyszukiwanie środka (kilka sekund)…",
+    .focusing = L"Ustawianie ostrości…",
+    .focusDone = L"Ostrość ustawiona.",
+    .followOn = L"Śledzenie twarzy włączone.",
+    .followOff = L"Śledzenie twarzy wyłączone.",
+    .followUnavailable = L"Wykrywanie twarzy nie jest dostępne na tym komputerze.",
+    .menuHotkeys = L"Skróty globalne (Ctrl+Alt+strzałki)",
+    .menuGamepad = L"Kontroler Xbox",
+    .menuDiagnostics = L"Kopiuj diagnostykę",
+    .menuImageSettings = L"Ustawienia obrazu (Windows)…",
+    .diagnosticsCopied = L"Diagnostykę skopiowano do schowka.",
+    .hotkeysFailed = L"Niektóre skróty globalne są już używane przez inną aplikację.",
 };
 
 inline constexpr const Texts* kLanguages[] = {&kEnglish, &kFrench, &kSpanish, &kPolish};

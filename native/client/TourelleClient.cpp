@@ -52,7 +52,7 @@ bool IsTourelle(IMFActivate* device) {
     return match;
 }
 
-HRESULT SendMotor(IUnknown* source, ULONG id, void* data, ULONG length) {
+HRESULT MotorProperty(IUnknown* source, ULONG id, ULONG flags, void* data, ULONG length) {
     if (!source) return E_POINTER;
     ComPtr<IKsControl> control;
     HRESULT hr = source->QueryInterface(IID_PPV_ARGS(&control));
@@ -60,9 +60,15 @@ HRESULT SendMotor(IUnknown* source, ULONG id, void* data, ULONG length) {
     KSPROPERTY property{};
     property.Set = PROPSETID_TourelleMotor;
     property.Id = id;
-    property.Flags = KSPROPERTY_TYPE_SET;
+    property.Flags = flags;
     ULONG returned = 0;
-    return control->KsProperty(&property, sizeof(property), data, length, &returned);
+    hr = control->KsProperty(&property, sizeof(property), data, length, &returned);
+    if (SUCCEEDED(hr) && (flags & KSPROPERTY_TYPE_GET) && returned < length) hr = E_UNEXPECTED;
+    return hr;
+}
+
+HRESULT SendMotor(IUnknown* source, ULONG id, void* data, ULONG length) {
+    return MotorProperty(source, id, KSPROPERTY_TYPE_SET, data, length);
 }
 
 }  // namespace
@@ -107,6 +113,31 @@ HRESULT PanTiltRelative(IUnknown* source, int16_t pan, int16_t tilt) {
 HRESULT PanTiltReset(IUnknown* source) {
     BYTE mask = 3;  // pan and tilt
     return SendMotor(source, TourelleMotor_PanTiltReset, &mask, sizeof(mask));
+}
+
+HRESULT PanTiltAbsolute(IUnknown* source, int16_t pan, int16_t tilt) {
+    TourellePanTilt target{pan, tilt};
+    return SendMotor(source, TourelleMotor_PanTiltAbsolute, &target, sizeof(target));
+}
+
+HRESULT GetPosition(IUnknown* source, int16_t* pan, int16_t* tilt, bool* known) {
+    if (!pan || !tilt || !known) return E_POINTER;
+    TourellePosition position{};
+    HRESULT hr = MotorProperty(source, TourelleMotor_PanTiltAbsolute, KSPROPERTY_TYPE_GET, &position, sizeof(position));
+    if (FAILED(hr)) return hr;
+    *pan = position.pan;
+    *tilt = position.tilt;
+    *known = (position.flags & TourellePosition_Known) != 0;
+    return S_OK;
+}
+
+HRESULT SetFocus(IUnknown* source, uint8_t value) {
+    return SendMotor(source, TourelleMotor_Focus, &value, sizeof(value));
+}
+
+HRESULT GetFocus(IUnknown* source, uint8_t* value) {
+    if (!value) return E_POINTER;
+    return MotorProperty(source, TourelleMotor_Focus, KSPROPERTY_TYPE_GET, value, 1);
 }
 
 }  // namespace tourelle::client

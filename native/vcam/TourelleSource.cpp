@@ -3,20 +3,65 @@
 #include <ksmedia.h>
 #include <mferror.h>
 
+#include <algorithm>
+#include <cstring>
 #include <system_error>
 
 #include "TourelleProperties.h"
 
 using Microsoft::WRL::ComPtr;
-using Microsoft::WRL::Make;
 using Microsoft::WRL::MakeAndInitialize;
 
 namespace tourelle {
 namespace {
 
 constexpr DWORD kStreamId = 0;
-constexpr ULONGLONG kIdleStopMs = 3000;  // close the camera after this long without a sample request
-constexpr uint32_t kFrameInterval = 10'000'000 / TourelleStream::kFps;  // 100 ns units
+constexpr ULONGLONG kIdleStopMs = 3000;         // close the camera after this long without a sample request
+constexpr ULONGLONG kRetryOpenMs = 1000;        // at most one reopen attempt per second (unplugged camera)
+
+// UVC processing unit controls behind PROPSETID_VIDCAP_VIDEOPROCAMP.
+struct ProcAmpControl {
+    ULONG ksId;
+    uint8_t selector;      // PU_*_CONTROL
+    uint8_t bit;           // bit in the processing unit's bmControls
+    uint8_t size;          // bytes
+    bool isSigned;
+    uint8_t autoSelector;  // 0 when there is no automatic mode
+    uint8_t autoBit;
+};
+
+constexpr ProcAmpControl kProcAmp[] = {
+    {KSPROPERTY_VIDEOPROCAMP_BACKLIGHT_COMPENSATION, 0x01, 8, 2, false, 0, 0},
+    {KSPROPERTY_VIDEOPROCAMP_BRIGHTNESS, 0x02, 0, 2, true, 0, 0},
+    {KSPROPERTY_VIDEOPROCAMP_CONTRAST, 0x03, 1, 2, false, 0, 0},
+    {KSPROPERTY_VIDEOPROCAMP_GAIN, 0x04, 9, 2, false, 0, 0},
+    {KSPROPERTY_VIDEOPROCAMP_POWERLINE_FREQUENCY, 0x05, 10, 1, false, 0, 0},
+    {KSPROPERTY_VIDEOPROCAMP_HUE, 0x06, 2, 2, true, 0x10, 11},
+    {KSPROPERTY_VIDEOPROCAMP_SATURATION, 0x07, 3, 2, false, 0, 0},
+    {KSPROPERTY_VIDEOPROCAMP_SHARPNESS, 0x08, 4, 2, false, 0, 0},
+    {KSPROPERTY_VIDEOPROCAMP_GAMMA, 0x09, 5, 2, false, 0, 0},
+    {KSPROPERTY_VIDEOPROCAMP_WHITEBALANCE, 0x0A, 6, 2, false, 0x0B, 12},
+};
+
+const ProcAmpControl* FindProcAmp(ULONG id) {
+    for (const auto& control : kProcAmp) {
+        if (control.ksId == id) return &control;
+    }
+    return nullptr;
+}
+
+LONG Decode(const std::vector<uint8_t>& bytes, const ProcAmpControl& control) {
+    if (bytes.size() < control.size) return 0;
+    if (control.size == 1) return bytes[0];
+    const uint16_t raw = static_cast<uint16_t>(bytes[0] | (bytes[1] << 8));
+    return control.isSigned ? static_cast<int16_t>(raw) : raw;
+}
+
+std::vector<uint8_t> Encode(LONG amount, const ProcAmpControl& control) {
+    if (control.size == 1) return {static_cast<uint8_t>(amount)};
+    const uint16_t raw = static_cast<uint16_t>(amount);
+    return {static_cast<uint8_t>(raw & 0xFF), static_cast<uint8_t>(raw >> 8)};
+}
 
 HRESULT HResultFromException() {
     try {
@@ -28,6 +73,11 @@ HRESULT HResultFromException() {
     } catch (...) {
         return E_FAIL;
     }
+}
+
+HRESULT MoreData(ULONG needed, ULONG* returned) {
+    *returned = needed;
+    return HRESULT_FROM_WIN32(ERROR_MORE_DATA);
 }
 
 }  // namespace
@@ -58,6 +108,7 @@ HRESULT TourelleSource::RuntimeClassInitialize() {
     due.dwLowDateTime = relative.LowPart;
     due.dwHighDateTime = relative.HighPart;
     SetThreadpoolTimer(idleTimer_, &due, 1000, 200);
+
     return S_OK;
 }
 
@@ -65,28 +116,6 @@ TourelleSource::~TourelleSource() {
     if (!shutdown_) Shutdown();
     CloseIdleTimer();
     if (mfStarted_) MFShutdown();
-}
-
-void CALLBACK TourelleSource::OnIdleTimer(PTP_CALLBACK_INSTANCE, PVOID context, PTP_TIMER) {
-    static_cast<TourelleSource*>(context)->StopIfIdle();
-}
-
-void TourelleSource::StopIfIdle() {
-    std::lock_guard guard(lock_);
-    if (!shutdown_ && camera_ && stream_->IdleMilliseconds() > kIdleStopMs) StopCamera();
-}
-
-void TourelleSource::Wake() {
-    std::lock_guard guard(lock_);
-    if (!shutdown_ && streaming_ && !camera_) StartCamera();
-}
-
-void TourelleSource::CloseIdleTimer() {
-    if (!idleTimer_) return;
-    SetThreadpoolTimer(idleTimer_, nullptr, 0, 0);
-    WaitForThreadpoolTimerCallbacks(idleTimer_, TRUE);  // never under lock_: the callback takes it
-    CloseThreadpoolTimer(idleTimer_);
-    idleTimer_ = nullptr;
 }
 
 HRESULT TourelleSource::CreateSourceAttributes() {
@@ -101,6 +130,34 @@ HRESULT TourelleSource::CreateSourceAttributes() {
     if (FAILED(hr = legacy->AddProfileFilter(kStreamId, L"((RES==;FRT<=30,1;SUT==))"))) return hr;
     if (FAILED(hr = profiles->AddProfile(legacy.Get()))) return hr;
     return attributes_->SetUnknown(MF_DEVICEMFT_SENSORPROFILE_COLLECTION, profiles.Get());
+}
+
+// Idle handling -----------------------------------------------------------------
+
+void CALLBACK TourelleSource::OnIdleTimer(PTP_CALLBACK_INSTANCE, PVOID context, PTP_TIMER) {
+    static_cast<TourelleSource*>(context)->StopIfIdle();
+}
+
+void TourelleSource::StopIfIdle() {
+    std::lock_guard guard(lock_);
+    if (shutdown_ || !camera_) return;
+    if (camera_->Lost() || stream_->IdleMilliseconds() > kIdleStopMs) StopCamera();
+}
+
+void TourelleSource::Wake() {
+    std::lock_guard guard(lock_);
+    if (shutdown_ || !streaming_ || camera_) return;
+    const ULONGLONG now = GetTickCount64();
+    if (now - lastStartAttempt_ < kRetryOpenMs) return;
+    StartCamera(stream_->Mode());
+}
+
+void TourelleSource::CloseIdleTimer() {
+    if (!idleTimer_) return;
+    SetThreadpoolTimer(idleTimer_, nullptr, 0, 0);
+    WaitForThreadpoolTimerCallbacks(idleTimer_, TRUE);  // never under lock_: the callback takes it
+    CloseThreadpoolTimer(idleTimer_);
+    idleTimer_ = nullptr;
 }
 
 // IMFMediaEventGenerator ------------------------------------------------------
@@ -126,7 +183,7 @@ IFACEMETHODIMP TourelleSource::EndGetEvent(IMFAsyncResult* result, IMFMediaEvent
 }
 
 IFACEMETHODIMP TourelleSource::QueueEvent(MediaEventType type, REFGUID extendedType, HRESULT status,
-                                       const PROPVARIANT* eventValue) {
+                                          const PROPVARIANT* eventValue) {
     std::lock_guard guard(lock_);
     return shutdown_ ? MF_E_SHUTDOWN : queue_->QueueEventParamVar(type, extendedType, status, eventValue);
 }
@@ -149,14 +206,23 @@ IFACEMETHODIMP TourelleSource::CreatePresentationDescriptor(IMFPresentationDescr
 }
 
 IFACEMETHODIMP TourelleSource::Start(IMFPresentationDescriptor* descriptor, const GUID* timeFormat,
-                                  const PROPVARIANT* startPosition) {
+                                     const PROPVARIANT* startPosition) {
     if (!descriptor || !startPosition) return E_INVALIDARG;
     if (timeFormat && *timeFormat != GUID_NULL) return MF_E_UNSUPPORTED_TIME_FORMAT;
     std::lock_guard guard(lock_);
     if (shutdown_) return MF_E_SHUTDOWN;
 
-    HRESULT hr = StartCamera();
+    // The media type the pipeline chose lives in the descriptor it passes here.
+    ComPtr<IMFStreamDescriptor> selectedStream;
+    ComPtr<IMFMediaTypeHandler> handler;
+    ComPtr<IMFMediaType> selectedType;
+    BOOL selected = FALSE;
+    HRESULT hr = descriptor->GetStreamDescriptorByIndex(0, &selected, &selectedStream);
+    if (SUCCEEDED(hr)) hr = selectedStream->GetMediaTypeHandler(&handler);
+    if (SUCCEEDED(hr)) hr = handler->GetCurrentMediaType(&selectedType);
     if (FAILED(hr)) return hr;
+
+    if (FAILED(hr = StartCamera(TourelleStream::ModeOf(selectedType.Get())))) return hr;
     streaming_ = true;
 
     ComPtr<IUnknown> stream;
@@ -164,7 +230,7 @@ IFACEMETHODIMP TourelleSource::Start(IMFPresentationDescriptor* descriptor, cons
     hr = queue_->QueueEventParamUnk(started_ ? MEUpdatedStream : MENewStream, GUID_NULL, S_OK, stream.Get());
     if (FAILED(hr)) return hr;
     started_ = true;
-    if (FAILED(hr = stream_->Start())) return hr;
+    if (FAILED(hr = stream_->Start(selectedType.Get()))) return hr;
 
     PROPVARIANT time{};
     time.vt = VT_I8;
@@ -189,7 +255,7 @@ IFACEMETHODIMP TourelleSource::Shutdown() {
         std::lock_guard guard(lock_);
         if (shutdown_) return MF_E_SHUTDOWN;
     }
-    CloseIdleTimer();  // outside lock_: waits for a running callback, which takes lock_
+    CloseIdleTimer();  // outside lock_: waits for a running callback, which takes it
     std::lock_guard guard(lock_);
     if (shutdown_) return MF_E_SHUTDOWN;
     streaming_ = false;
@@ -229,23 +295,192 @@ IFACEMETHODIMP TourelleSource::GetService(REFGUID, REFIID, LPVOID* object) {
 }
 
 // IKsControl ------------------------------------------------------------------
+// Requests come from any process that opens the camera: copy and size-check
+// everything before use.
 
 IFACEMETHODIMP TourelleSource::KsProperty(PKSPROPERTY property, ULONG propertyLength, LPVOID data, ULONG dataLength,
-                                       ULONG* bytesReturned) {
+                                          ULONG* bytesReturned) {
     if (!property || propertyLength < sizeof(KSPROPERTY) || !bytesReturned) return E_INVALIDARG;
     *bytesReturned = 0;
-    if (property->Set != PROPSETID_TourelleMotor) return HRESULT_FROM_WIN32(ERROR_SET_NOT_FOUND);
-    if (!(property->Flags & KSPROPERTY_TYPE_SET)) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
-
-    const ULONG needed = property->Id == TourelleMotor_PanTiltRelative ? 4
-                         : property->Id == TourelleMotor_PanTiltReset  ? 1
-                                                                     : 0;
-    if (needed == 0) return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
-    if (!data || dataLength < needed) {
-        *bytesReturned = needed;
-        return HRESULT_FROM_WIN32(ERROR_MORE_DATA);
+    KSPROPERTY header;
+    std::memcpy(&header, property, sizeof(header));
+    {
+        std::lock_guard guard(lock_);
+        if (shutdown_) return MF_E_SHUTDOWN;
     }
-    return MotorCommand(property->Id, static_cast<const BYTE*>(data), needed);
+    if (header.Set == PROPSETID_TourelleMotor) {
+        return MotorProperty(header.Id, header.Flags, data, dataLength, bytesReturned);
+    }
+    if (header.Set == PROPSETID_VIDCAP_CAMERACONTROL) {
+        return CameraControlProperty(header.Id, header.Flags, data, dataLength, bytesReturned);
+    }
+    if (header.Set == PROPSETID_VIDCAP_VIDEOPROCAMP) {
+        return ProcAmpProperty(header.Id, header.Flags, data, dataLength, bytesReturned);
+    }
+    return HRESULT_FROM_WIN32(ERROR_SET_NOT_FOUND);
+}
+
+HRESULT TourelleSource::MotorProperty(ULONG id, ULONG flags, void* data, ULONG length, ULONG* returned) {
+    const core::KsOperation operation = core::OperationOf(flags);
+    switch (id) {
+        case TourelleMotor_PanTiltRelative:
+        case TourelleMotor_PanTiltAbsolute: {
+            if (operation == core::KsOperation::Get && id == TourelleMotor_PanTiltAbsolute) {
+                if (!data || length < sizeof(TourellePosition)) return MoreData(sizeof(TourellePosition), returned);
+                TourellePosition position{};
+                bool known = false;
+                const core::PanTilt current = MotorService::Get().Position(&known);
+                position.pan = core::ToMotorValue(current.pan);
+                position.tilt = core::ToMotorValue(current.tilt);
+                position.flags = known ? TourellePosition_Known : 0;
+                std::memcpy(data, &position, sizeof(position));
+                *returned = sizeof(position);
+                return S_OK;
+            }
+            if (operation != core::KsOperation::Set) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+            if (!data || length < sizeof(TourellePanTilt)) return MoreData(sizeof(TourellePanTilt), returned);
+            TourellePanTilt move;
+            std::memcpy(&move, data, sizeof(move));
+            MotorService::Get().Enqueue({id == TourelleMotor_PanTiltRelative ? MotorService::Command::Kind::Relative : MotorService::Command::Kind::Absolute,
+                     {move.pan, move.tilt}});
+            return S_OK;
+        }
+        case TourelleMotor_PanTiltReset:
+            if (operation != core::KsOperation::Set) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+            if (!data || length < 1) return MoreData(1, returned);
+            if (static_cast<const uint8_t*>(data)[0] & 3) MotorService::Get().Enqueue({MotorService::Command::Kind::Reset});
+            return S_OK;
+        case TourelleMotor_Focus:
+            if (!data || length < 1) return MoreData(1, returned);
+            if (operation == core::KsOperation::Get) {
+                static_cast<uint8_t*>(data)[0] = static_cast<uint8_t>(MotorService::Get().Focus());
+                *returned = 1;
+                return S_OK;
+            }
+            if (operation != core::KsOperation::Set) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+            MotorService::Get().Enqueue({MotorService::Command::Kind::Focus, {}, static_cast<const uint8_t*>(data)[0]});
+            return S_OK;
+        default:
+            return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    }
+}
+
+HRESULT TourelleSource::CameraControlProperty(ULONG id, ULONG flags, void* data, ULONG length, ULONG* returned) {
+    core::LongRange range;
+    if (id == KSPROPERTY_CAMERACONTROL_PAN) {
+        range = {-core::kPanLimit / core::kUnitsPerDegree, core::kPanLimit / core::kUnitsPerDegree, 1, 0};
+    } else if (id == KSPROPERTY_CAMERACONTROL_TILT) {
+        range = {-core::kTiltLimit / core::kUnitsPerDegree, core::kTiltLimit / core::kUnitsPerDegree, 1, 0};
+    } else if (id == KSPROPERTY_CAMERACONTROL_FOCUS) {
+        range = {core::kFocusMin, core::kFocusMax, 1, 0};
+    } else {
+        return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    }
+    constexpr ULONG kManual = KSPROPERTY_CAMERACONTROL_FLAGS_MANUAL;
+
+    switch (core::OperationOf(flags)) {
+        case core::KsOperation::BasicSupport:
+            return core::WriteBasicSupport(range, data, length, returned);
+        case core::KsOperation::Get: {
+            LONG amount = 0;
+            {
+                const core::PanTilt position = MotorService::Get().Position(nullptr);
+                amount = id == KSPROPERTY_CAMERACONTROL_PAN    ? position.pan / core::kUnitsPerDegree
+                        : id == KSPROPERTY_CAMERACONTROL_TILT ? position.tilt / core::kUnitsPerDegree
+                                                              : MotorService::Get().Focus();
+            }
+            return core::WriteControlValue(data, length, amount, kManual, kManual, returned);
+        }
+        case core::KsOperation::Set: {
+            LONG amount = 0;
+            ULONG ignored = 0;
+            if (!core::ReadControlValue(data, length, &amount, &ignored)) {
+                return MoreData(sizeof(KSPROPERTY_CAMERACONTROL_S), returned);
+            }
+            amount = std::clamp(amount, range.minimum, range.maximum);
+            if (id == KSPROPERTY_CAMERACONTROL_FOCUS) {
+                MotorService::Get().Enqueue({MotorService::Command::Kind::Focus, {}, static_cast<int>(amount)});
+                return S_OK;
+            }
+            bool known = false;
+            core::PanTilt target = MotorService::Get().Position(&known);
+            if (!known) target = {};
+            (id == KSPROPERTY_CAMERACONTROL_PAN ? target.pan : target.tilt) = amount * core::kUnitsPerDegree;
+            MotorService::Get().Enqueue({MotorService::Command::Kind::Absolute, target});
+            return S_OK;
+        }
+        default:
+            return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+    }
+}
+
+HRESULT TourelleSource::ProcAmpProperty(ULONG id, ULONG flags, void* data, ULONG length, ULONG* returned) {
+    const ProcAmpControl* control = FindProcAmp(id);
+    if (!control) return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    const core::KsOperation operation = core::OperationOf(flags);
+    if (operation == core::KsOperation::Unsupported) return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+
+    // Validate the caller's buffer before touching the camera.
+    LONG requested = 0;
+    ULONG requestedFlags = 0;
+    if (operation == core::KsOperation::Set && !core::ReadControlValue(data, length, &requested, &requestedFlags)) {
+        return MoreData(sizeof(KSPROPERTY_VIDEOPROCAMP_S), returned);
+    }
+    if (operation == core::KsOperation::Get && (!data || length < sizeof(KSPROPERTY_VIDEOPROCAMP_S))) {
+        return MoreData(sizeof(KSPROPERTY_VIDEOPROCAMP_S), returned);
+    }
+
+    HRESULT result = HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+    HRESULT hr = CameraHub::Get().With([&](UvcDevice& camera) {
+        const auto& config = camera.Configuration();
+        if (!config.processingUnit || !(config.processingControls & (1u << control->bit))) return;  // not on this camera
+        const uint8_t unit = config.processingUnit;
+        const bool hasAuto = control->autoSelector && (config.processingControls & (1u << control->autoBit));
+        const ULONG capabilities = KSPROPERTY_VIDEOPROCAMP_FLAGS_MANUAL |
+                                   (hasAuto ? KSPROPERTY_VIDEOPROCAMP_FLAGS_AUTO : 0);
+
+        auto it = procAmpRanges_.find(id);
+        if (it == procAmpRanges_.end()) {
+            core::LongRange range;
+            range.minimum = Decode(camera.GetControl(kGetMin, unit, control->selector, control->size), *control);
+            range.maximum = Decode(camera.GetControl(kGetMax, unit, control->selector, control->size), *control);
+            range.step = std::max<LONG>(1, Decode(camera.GetControl(kGetRes, unit, control->selector, control->size),
+                                                  *control));
+            range.defaultValue = Decode(camera.GetControl(kGetDef, unit, control->selector, control->size), *control);
+            range.supportsAuto = hasAuto;
+            it = procAmpRanges_.emplace(id, range).first;
+        }
+        const core::LongRange& range = it->second;
+
+        switch (operation) {
+            case core::KsOperation::BasicSupport:
+                result = core::WriteBasicSupport(range, data, length, returned);
+                break;
+            case core::KsOperation::Get: {
+                const LONG amount = Decode(camera.GetControl(kGetCur, unit, control->selector, control->size), *control);
+                bool automatic = false;
+                if (hasAuto) automatic = camera.GetControl(kGetCur, unit, control->autoSelector, 1)[0] != 0;
+                result = core::WriteControlValue(
+                    data, length, amount,
+                    automatic ? KSPROPERTY_VIDEOPROCAMP_FLAGS_AUTO : KSPROPERTY_VIDEOPROCAMP_FLAGS_MANUAL,
+                    capabilities, returned);
+                break;
+            }
+            case core::KsOperation::Set: {
+                const bool automatic = hasAuto && (requestedFlags & KSPROPERTY_VIDEOPROCAMP_FLAGS_AUTO);
+                if (hasAuto) camera.SetControl(unit, control->autoSelector, {static_cast<uint8_t>(automatic ? 1 : 0)});
+                if (!automatic) {
+                    camera.SetControl(unit, control->selector,
+                                      Encode(std::clamp(requested, range.minimum, range.maximum), *control));
+                }
+                result = S_OK;
+                break;
+            }
+            default:
+                break;
+        }
+    });
+    return FAILED(hr) ? hr : result;
 }
 
 IFACEMETHODIMP TourelleSource::KsMethod(PKSMETHOD, ULONG, LPVOID, ULONG, ULONG*) {
@@ -266,7 +501,7 @@ IFACEMETHODIMP TourelleSource::SetDefaultAllocator(DWORD outputStreamId, IUnknow
 }
 
 IFACEMETHODIMP TourelleSource::GetAllocatorUsage(DWORD outputStreamId, DWORD* inputStreamId,
-                                              MFSampleAllocatorUsage* usage) {
+                                                 MFSampleAllocatorUsage* usage) {
     if (!inputStreamId || !usage) return E_POINTER;
     if (outputStreamId != kStreamId) return MF_E_INVALIDSTREAMNUMBER;
     *inputStreamId = outputStreamId;
@@ -276,20 +511,22 @@ IFACEMETHODIMP TourelleSource::GetAllocatorUsage(DWORD outputStreamId, DWORD* in
 
 // Camera ----------------------------------------------------------------------
 
-HRESULT TourelleSource::StartCamera() {
+HRESULT TourelleSource::StartCamera(const TourelleStream::VideoMode& mode) {
     if (camera_) return S_OK;
+    lastStartAttempt_ = GetTickCount64();
     try {
         auto camera = UvcDevice::Open();
         const FrameFormat* format = nullptr;
         for (const auto& f : camera->Formats()) {
-            if (!f.mjpeg && f.width == TourelleStream::kWidth && f.height == TourelleStream::kHeight) format = &f;
+            if (!f.mjpeg && f.width == mode.width && f.height == mode.height) format = &f;
         }
         if (!format) return MF_E_INVALIDMEDIATYPE;
         camera->SetConstantFrameRate(true);
         ComPtr<TourelleStream> stream = stream_;
-        camera->Start(*format, kFrameInterval,
+        camera->Start(*format, 10'000'000 / mode.fps,
                       [stream](const uint8_t* frame, size_t size) { stream->DeliverFrame(frame, size); });
         camera_ = std::move(camera);
+        CameraHub::Get().Attach(camera_.get());
         return S_OK;
     } catch (...) {
         return HResultFromException();
@@ -297,32 +534,8 @@ HRESULT TourelleSource::StartCamera() {
 }
 
 void TourelleSource::StopCamera() {
+    if (camera_) CameraHub::Get().Detach(camera_.get());  // waits for a motor command using it
     camera_.reset();  // stops streaming and releases WinUSB for other processes
-}
-
-HRESULT TourelleSource::MotorCommand(ULONG id, const BYTE* data, ULONG length) {
-    std::lock_guard guard(lock_);
-    if (shutdown_) return MF_E_SHUTDOWN;
-    try {
-        // Not streaming: open the camera just for this command.
-        std::unique_ptr<UvcDevice> temporary;
-        UvcDevice* camera = camera_.get();
-        if (!camera) {
-            temporary = UvcDevice::Open();
-            camera = temporary.get();
-        }
-        if (id == TourelleMotor_PanTiltRelative && length == 4) {
-            int16_t pan = 0, tilt = 0;
-            memcpy(&pan, data, 2);
-            memcpy(&tilt, data + 2, 2);
-            camera->PanTiltRelative(pan, tilt);
-        } else if (id == TourelleMotor_PanTiltReset && length == 1) {
-            camera->PanTiltReset((data[0] & 1) != 0, (data[0] & 2) != 0);
-        }
-        return S_OK;
-    } catch (...) {
-        return HResultFromException();
-    }
 }
 
 }  // namespace tourelle

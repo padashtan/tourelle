@@ -21,11 +21,22 @@ class TourelleStream
                                           Microsoft::WRL::ChainInterfaces<IMFMediaStream2, IMFMediaStream,
                                                                           IMFMediaEventGenerator>> {
 public:
-    static constexpr UINT32 kWidth = 640;
-    static constexpr UINT32 kHeight = 480;
-    static constexpr UINT32 kFps = 30;
+    // Uncompressed (YUY2) camera modes the virtual camera offers, each as NV12 and YUY2.
+    struct VideoMode {
+        UINT32 width;
+        UINT32 height;
+        UINT32 fps;
+    };
+    static constexpr VideoMode kModes[] = {{640, 480, 30}, {800, 600, 25}, {960, 720, 10}};
 
     HRESULT RuntimeClassInitialize(IMFMediaSource* source, DWORD streamId);
+
+    // Mode of the stream descriptor's current media type (the first mode by default).
+    VideoMode SelectedMode();
+    // Mode of a media type (the first mode when it matches none).
+    static VideoMode ModeOf(IMFMediaType* type);
+    // Mode the stream was started with.
+    VideoMode Mode();
 
     // IMFMediaEventGenerator
     IFACEMETHODIMP GetEvent(DWORD flags, IMFMediaEvent** event) override;
@@ -45,7 +56,7 @@ public:
 
     // Called by the source.
     HRESULT SetAllocator(IUnknown* allocator);
-    HRESULT Start();
+    HRESULT Start(IMFMediaType* selected = nullptr);
     HRESULT Stop();
     void Shutdown();
     void DeliverFrame(const BYTE* yuy2, size_t size);  // camera thread
@@ -58,7 +69,7 @@ public:
     ULONGLONG IdleMilliseconds() const { return GetTickCount64() - lastRequest_; }
 
 private:
-    HRESULT CreateMediaType(REFGUID subtype, IMFMediaType** type);
+    HRESULT CreateMediaType(REFGUID subtype, const VideoMode& mode, IMFMediaType** type);
     HRESULT FillSample(const BYTE* yuy2, IMFSample* sample);
 
     std::mutex lock_;
@@ -70,6 +81,7 @@ private:
     Microsoft::WRL::ComPtr<IMFAttributes> attributes_;  // the stream descriptor's attributes
     Microsoft::WRL::ComPtr<IMFVideoSampleAllocator> allocator_;
     GUID subtype_ = MFVideoFormat_NV12;
+    VideoMode mode_ = kModes[0];  // set at Start, under lock_
     std::deque<Microsoft::WRL::ComPtr<IUnknown>> tokens_;  // pending requests, may hold null tokens
     std::function<void()> wake_;
     std::atomic<ULONGLONG> lastRequest_{0};

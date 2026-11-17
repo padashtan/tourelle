@@ -4,6 +4,8 @@
 #include <ksmedia.h>
 #include <mferror.h>
 
+#include "Imaging.h"
+
 using Microsoft::WRL::ComPtr;
 
 namespace tourelle {
@@ -13,15 +15,24 @@ HRESULT TourelleStream::RuntimeClassInitialize(IMFMediaSource* source, DWORD str
     HRESULT hr = MFCreateEventQueue(&queue_);
     if (FAILED(hr)) return hr;
 
-    ComPtr<IMFMediaType> nv12, yuy2;
-    if (FAILED(hr = CreateMediaType(MFVideoFormat_NV12, &nv12))) return hr;
-    if (FAILED(hr = CreateMediaType(MFVideoFormat_YUY2, &yuy2))) return hr;
-    IMFMediaType* types[] = {nv12.Get(), yuy2.Get()};
-    if (FAILED(hr = MFCreateStreamDescriptor(streamId, ARRAYSIZE(types), types, &descriptor_))) return hr;
+    // NV12 first (what most apps want), then YUY2, for every mode.
+    std::vector<ComPtr<IMFMediaType>> types;
+    for (const GUID& subtype : {MFVideoFormat_NV12, MFVideoFormat_YUY2}) {
+        for (const VideoMode& mode : kModes) {
+            ComPtr<IMFMediaType> type;
+            if (FAILED(hr = CreateMediaType(subtype, mode, &type))) return hr;
+            types.push_back(type);
+        }
+    }
+    std::vector<IMFMediaType*> raw;
+    for (const auto& type : types) raw.push_back(type.Get());
+    if (FAILED(hr = MFCreateStreamDescriptor(streamId, static_cast<DWORD>(raw.size()), raw.data(), &descriptor_))) {
+        return hr;
+    }
 
     ComPtr<IMFMediaTypeHandler> handler;
     if (FAILED(hr = descriptor_->GetMediaTypeHandler(&handler))) return hr;
-    if (FAILED(hr = handler->SetCurrentMediaType(nv12.Get()))) return hr;
+    if (FAILED(hr = handler->SetCurrentMediaType(raw.front()))) return hr;
 
     if (FAILED(hr = descriptor_.As(&attributes_))) return hr;
     attributes_->SetGUID(MF_DEVICESTREAM_STREAM_CATEGORY, PINNAME_VIDEO_CAPTURE);
@@ -31,23 +42,36 @@ HRESULT TourelleStream::RuntimeClassInitialize(IMFMediaSource* source, DWORD str
     return S_OK;
 }
 
-HRESULT TourelleStream::CreateMediaType(REFGUID subtype, IMFMediaType** result) {
+HRESULT TourelleStream::CreateMediaType(REFGUID subtype, const VideoMode& mode, IMFMediaType** result) {
     ComPtr<IMFMediaType> type;
     HRESULT hr = MFCreateMediaType(&type);
     if (FAILED(hr)) return hr;
     const UINT32 bitsPerPixel = subtype == MFVideoFormat_NV12 ? 12 : 16;
-    const LONG stride = subtype == MFVideoFormat_NV12 ? kWidth : kWidth * 2;
+    const LONG stride = static_cast<LONG>(subtype == MFVideoFormat_NV12 ? mode.width : mode.width * 2);
     type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
     type->SetGUID(MF_MT_SUBTYPE, subtype);
-    MFSetAttributeSize(type.Get(), MF_MT_FRAME_SIZE, kWidth, kHeight);
-    MFSetAttributeRatio(type.Get(), MF_MT_FRAME_RATE, kFps, 1);
+    MFSetAttributeSize(type.Get(), MF_MT_FRAME_SIZE, mode.width, mode.height);
+    MFSetAttributeRatio(type.Get(), MF_MT_FRAME_RATE, mode.fps, 1);
     MFSetAttributeRatio(type.Get(), MF_MT_PIXEL_ASPECT_RATIO, 1, 1);
     type->SetUINT32(MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
     type->SetUINT32(MF_MT_ALL_SAMPLES_INDEPENDENT, TRUE);
     type->SetUINT32(MF_MT_DEFAULT_STRIDE, static_cast<UINT32>(stride));
-    type->SetUINT32(MF_MT_AVG_BITRATE, kWidth * kHeight * bitsPerPixel * kFps);
+    type->SetUINT32(MF_MT_AVG_BITRATE, mode.width * mode.height * bitsPerPixel * mode.fps);
     *result = type.Detach();
     return S_OK;
+}
+
+TourelleStream::VideoMode TourelleStream::SelectedMode() {
+    ComPtr<IMFMediaTypeHandler> handler;
+    ComPtr<IMFMediaType> type;
+    UINT32 width = 0, height = 0;
+    if (SUCCEEDED(descriptor_->GetMediaTypeHandler(&handler)) && SUCCEEDED(handler->GetCurrentMediaType(&type)) &&
+        SUCCEEDED(MFGetAttributeSize(type.Get(), MF_MT_FRAME_SIZE, &width, &height))) {
+        for (const VideoMode& mode : kModes) {
+            if (mode.width == width && mode.height == height) return mode;
+        }
+    }
+    return kModes[0];
 }
 
 // IMFMediaEventGenerator ------------------------------------------------------
@@ -139,17 +163,39 @@ HRESULT TourelleStream::SetAllocator(IUnknown* allocator) {
     return allocator ? allocator->QueryInterface(IID_PPV_ARGS(&allocator_)) : S_OK;
 }
 
-HRESULT TourelleStream::Start() {
+TourelleStream::VideoMode TourelleStream::ModeOf(IMFMediaType* type) {
+    UINT32 width = 0, height = 0;
+    if (type && SUCCEEDED(MFGetAttributeSize(type, MF_MT_FRAME_SIZE, &width, &height))) {
+        for (const VideoMode& mode : kModes) {
+            if (mode.width == width && mode.height == height) return mode;
+        }
+    }
+    return kModes[0];
+}
+
+TourelleStream::VideoMode TourelleStream::Mode() {
+    std::lock_guard guard(lock_);
+    return mode_;
+}
+
+HRESULT TourelleStream::Start(IMFMediaType* selected) {
     std::lock_guard guard(lock_);
     if (shutdown_) return MF_E_SHUTDOWN;
     if (state_ == MF_STREAM_STATE_RUNNING) return S_OK;
 
-    ComPtr<IMFMediaTypeHandler> handler;
-    ComPtr<IMFMediaType> type;
-    HRESULT hr = descriptor_->GetMediaTypeHandler(&handler);
-    if (SUCCEEDED(hr)) hr = handler->GetCurrentMediaType(&type);
+    // The type comes from the presentation descriptor the pipeline passed to the
+    // source's Start; IMFMediaStream2::SetStreamState has none and uses ours.
+    ComPtr<IMFMediaType> type = selected;
+    HRESULT hr = S_OK;
+    if (!type) {
+        ComPtr<IMFMediaTypeHandler> handler;
+        hr = descriptor_->GetMediaTypeHandler(&handler);
+        if (SUCCEEDED(hr)) hr = handler->GetCurrentMediaType(&type);
+    }
     if (SUCCEEDED(hr)) hr = type->GetGUID(MF_MT_SUBTYPE, &subtype_);
     if (FAILED(hr)) return hr;
+    if (subtype_ != MFVideoFormat_NV12 && subtype_ != MFVideoFormat_YUY2) return MF_E_INVALIDMEDIATYPE;
+    mode_ = ModeOf(type.Get());
 
     // Use the pipeline's allocator when it gave one, otherwise our own.
     if (!allocator_ && FAILED(hr = MFCreateVideoSampleAllocatorEx(IID_PPV_ARGS(&allocator_)))) return hr;
@@ -185,8 +231,8 @@ void TourelleStream::Shutdown() {
 }
 
 void TourelleStream::DeliverFrame(const BYTE* yuy2, size_t size) {
-    if (size < static_cast<size_t>(kWidth) * kHeight * 2) return;
     std::lock_guard guard(lock_);
+    if (size < static_cast<size_t>(mode_.width) * mode_.height * 2) return;  // frame of another mode
     if (shutdown_ || state_ != MF_STREAM_STATE_RUNNING || tokens_.empty()) return;  // nobody asked: drop
 
     ComPtr<IMFSample> sample;
@@ -196,7 +242,7 @@ void TourelleStream::DeliverFrame(const BYTE* yuy2, size_t size) {
     ComPtr<IUnknown> token = std::move(tokens_.front());
     tokens_.pop_front();
     sample->SetSampleTime(MFGetSystemTime());
-    sample->SetSampleDuration(10'000'000 / kFps);
+    sample->SetSampleDuration(10'000'000 / mode_.fps);
     if (token) sample->SetUnknown(MFSampleExtension_Token, token.Get());
     queue_->QueueEventParamUnk(MEMediaSample, GUID_NULL, S_OK, sample.Get());
 }
@@ -214,24 +260,16 @@ HRESULT TourelleStream::FillSample(const BYTE* yuy2, IMFSample* sample) {
     DWORD length = 0;
     if (FAILED(hr = buffer2d->Lock2DSize(MF2DBuffer_LockFlags_Write, &scanline0, &pitch, &start, &length))) return hr;
 
-    const size_t srcStride = kWidth * 2;
+    const UINT32 width = mode_.width, height = mode_.height;
+    const size_t srcStride = static_cast<size_t>(width) * 2;
     if (subtype_ == MFVideoFormat_YUY2) {
-        for (UINT32 y = 0; y < kHeight; ++y) memcpy(scanline0 + static_cast<ptrdiff_t>(y) * pitch, yuy2 + y * srcStride, srcStride);
-    } else {
-        // NV12: full-resolution Y plane, then interleaved U/V at half resolution.
-        BYTE* uvPlane = scanline0 + static_cast<ptrdiff_t>(pitch) * kHeight;
-        for (UINT32 y = 0; y < kHeight; ++y) {
-            const BYTE* src = yuy2 + y * srcStride;
-            BYTE* dstY = scanline0 + static_cast<ptrdiff_t>(y) * pitch;
-            for (UINT32 x = 0; x < kWidth; ++x) dstY[x] = src[x * 2];
-            if ((y & 1) == 0) {
-                BYTE* dstUV = uvPlane + static_cast<ptrdiff_t>(y / 2) * pitch;
-                for (UINT32 x = 0; x < kWidth; x += 2) {
-                    dstUV[x] = src[x * 2 + 1];      // U
-                    dstUV[x + 1] = src[x * 2 + 3];  // V
-                }
-            }
+        if (pitch < static_cast<LONG>(srcStride) || length < static_cast<DWORD>(pitch) * height) {
+            buffer2d->Unlock2D();
+            return E_UNEXPECTED;
         }
+        for (UINT32 y = 0; y < height; ++y) memcpy(scanline0 + static_cast<ptrdiff_t>(y) * pitch, yuy2 + y * srcStride, srcStride);
+    } else if (pitch >= static_cast<LONG>(width) && length >= static_cast<DWORD>(pitch) * height * 3 / 2) {
+        core::Yuy2ToNv12(yuy2, width, height, scanline0, pitch);
     }
     buffer2d->Unlock2D();
     return S_OK;

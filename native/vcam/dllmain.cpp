@@ -1,5 +1,8 @@
 #include <windows.h>
+#pragma warning(push)
+#pragma warning(disable : 4324)  // structure padded due to alignment specifier, inside the SDK's wrl/module.h
 #include <wrl/module.h>
+#pragma warning(pop)
 
 #include "TourelleActivate.h"
 
