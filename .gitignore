@@ -1,0 +1,7 @@
+native/build/
+build/
+dist/
+*.bmp
+*.png
+!docs/**/*.png
+.vs/

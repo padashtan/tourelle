@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tourelle banner</title>
+<style>
+  :root { --bg: #0f1419; --text: #e8edf2; --muted: #93a1b0; --accent: #f5a524; --ok: #3ccf91; --line: #233040; }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 1280px; height: 640px; overflow: hidden; color: var(--text);
+    font-family: "Segoe UI", system-ui, sans-serif;
+    background:
+      radial-gradient(circle at 78% 50%, #1e2a36 0%, rgba(15,20,25,0) 55%),
+      linear-gradient(var(--line) 1px, transparent 1px) 0 0 / 40px 40px,
+      linear-gradient(90deg, var(--line) 1px, transparent 1px) 0 0 / 40px 40px,
+      var(--bg);
+  }
+  .wrap { display: grid; grid-template-columns: 1fr 520px; height: 100%; align-items: center; padding: 0 70px 0 80px; }
+  .tag { display: inline-block; font-size: 18px; font-weight: 700; letter-spacing: .16em; text-transform: uppercase;
+         color: var(--accent); border: 1px solid #5a4316; background: #241c0d; border-radius: 999px; padding: 8px 16px; }
+  h1 { font-size: 120px; font-weight: 800; letter-spacing: -2px; margin: 22px 0 8px; line-height: 1; }
+  p { font-size: 32px; line-height: 1.32; color: var(--muted); max-width: 640px; }
+  p b { color: var(--text); font-weight: 600; }
+  .chips { margin-top: 34px; display: flex; gap: 12px; flex-wrap: wrap; }
+  .chip { font-family: "Cascadia Mono", Consolas, monospace; font-size: 19px; color: #c7d2dd;
+          background: #18222c; border: 1px solid #2c3a49; border-radius: 10px; padding: 8px 14px; }
+  .chip.live { color: var(--ok); border-color: #2f5c45; background: #15241d; }
+  svg { width: 520px; height: 560px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div>
+    <span class="tag">Windows 11 · open source</span>
+    <h1>Tourelle</h1>
+    <p>Live <b>pan/tilt</b> for a motorized webcam, <b>no vendor driver</b>. Steer the head while Teams, Zoom or OBS are using the camera.</p>
+    <div class="chips">
+      <span class="chip live">● live 30 fps</span>
+      <span class="chip">pan ±70°</span>
+      <span class="chip">tilt ±30°</span>
+      <span class="chip">user-mode UVC</span>
+      <span class="chip">virtual camera</span>
+    </div>
+  </div>
+
+  <!-- Generic motorized sphere camera (illustration, not a product drawing). -->
+  <svg viewBox="0 0 520 560" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+    <defs>
+      <radialGradient id="shell" cx="38%" cy="32%" r="75%">
+        <stop offset="0" stop-color="#f4f6f8"/><stop offset=".55" stop-color="#b9c2cc"/><stop offset="1" stop-color="#58636f"/>
+      </radialGradient>
+      <radialGradient id="lens" cx="40%" cy="38%" r="70%">
+        <stop offset="0" stop-color="#3b5d86"/><stop offset=".45" stop-color="#101a26"/><stop offset="1" stop-color="#05080c"/>
+      </radialGradient>
+      <linearGradient id="base" x1="0" x2="0" y1="0" y2="1">
+        <stop offset="0" stop-color="#3a4552"/><stop offset="1" stop-color="#1b232c"/>
+      </linearGradient>
+      <marker id="arrow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+        <path d="M0,0 L10,5 L0,10 z" fill="#f5a524"/>
+      </marker>
+    </defs>
+
+    <!-- tilt arc (vertical) -->
+    <path d="M 432 150 A 190 190 0 0 1 432 370" fill="none" stroke="#f5a524" stroke-width="7"
+          stroke-linecap="round" stroke-dasharray="2 16" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+
+    <!-- stand -->
+    <ellipse cx="260" cy="512" rx="150" ry="26" fill="#0a0e12" opacity=".6"/>
+    <path d="M150 500 Q160 455 210 448 L310 448 Q360 455 370 500 Z" fill="url(#base)" stroke="#4a5866" stroke-width="2"/>
+    <rect x="236" y="380" width="48" height="74" rx="14" fill="url(#base)" stroke="#4a5866" stroke-width="2"/>
+
+    <!-- pan arc (horizontal), behind/around the neck -->
+    <path d="M 120 420 A 140 34 0 0 0 400 420" fill="none" stroke="#f5a524" stroke-width="7"
+          stroke-linecap="round" stroke-dasharray="2 16" marker-start="url(#arrow)" marker-end="url(#arrow)"/>
+
+    <!-- sphere head -->
+    <circle cx="260" cy="250" r="150" fill="url(#shell)"/>
+    <ellipse cx="260" cy="250" rx="150" ry="150" fill="none" stroke="#e8edf2" stroke-opacity=".25" stroke-width="2"/>
+    <path d="M118 290 Q260 340 402 290" fill="none" stroke="#6b7682" stroke-width="3" opacity=".7"/>
+    <!-- lens -->
+    <circle cx="282" cy="236" r="78" fill="#1a232d"/>
+    <circle cx="282" cy="236" r="64" fill="url(#lens)" stroke="#2c3b4c" stroke-width="4"/>
+    <circle cx="282" cy="236" r="34" fill="none" stroke="#3d6fa8" stroke-opacity=".55" stroke-width="3"/>
+    <circle cx="262" cy="214" r="12" fill="#ffffff" opacity=".75"/>
+    <circle cx="300" cy="256" r="5" fill="#ffffff" opacity=".35"/>
+    <!-- status light -->
+    <circle cx="282" cy="140" r="7" fill="#3ccf91"/>
+    <circle cx="282" cy="140" r="14" fill="#3ccf91" opacity=".2"/>
+  </svg>
+</div>
+</body>
+</html>
