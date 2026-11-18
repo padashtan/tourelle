@@ -42,7 +42,7 @@ set(TOURELLE_DELAYLOAD_MF /DELAYLOAD:mfplat.dll /DELAYLOAD:mf.dll /DELAYLOAD:mfr
 
 # Ninja does not track the headers a .rc file includes: rebuild the version resources
 # when the version changes.
-set_source_files_properties(app/Tourelle.rc vcam/TourelleCamera.rc PROPERTIES
+set_source_files_properties(app/Tourelle.rc vcam/TourelleCamera.rc tools/tourelle-cli.rc PROPERTIES
                             OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/app/Version.h)
 
 # Pure logic, no hardware: descriptor parsing, frame assembly, imaging, motor math, KS helpers.
@@ -88,8 +88,9 @@ target_link_libraries(Tourelle PRIVATE client core windowsapp advapi32 delayimp)
 target_link_options(Tourelle PRIVATE /MANIFESTUAC:NO ${TOURELLE_SYSTEM32_ONLY} ${TOURELLE_DELAYLOAD_MF}
                     /DELAYLOAD:newdev.dll /DELAYLOAD:dwmapi.dll /DELAYLOAD:comctl32.dll)  # UAC level: Tourelle.manifest
 
-add_executable(tourelle-cli tools/tourelle-cli.cpp)
+add_executable(tourelle-cli tools/tourelle-cli.cpp tools/tourelle-cli.rc)
 target_link_libraries(tourelle-cli PRIVATE client delayimp)
+target_include_directories(tourelle-cli PRIVATE app)  # Version.h
 target_link_options(tourelle-cli PRIVATE ${TOURELLE_SYSTEM32_ONLY} ${TOURELLE_DELAYLOAD_MF})
 
 # Hardware test bench, without the virtual camera (developer tool, not shipped).

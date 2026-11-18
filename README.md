@@ -118,10 +118,48 @@ the unit tests under AddressSanitizer, PSScriptAnalyzer, and a planted-DLL test 
 loaded from the executables' folder). It also builds the installer.
 [CONTRIBUTING.md](CONTRIBUTING.md) describes the layout and the hardware checks.
 
+## What the installer changes
+
+Setup asks for administrator rights once and makes these changes, all undone by the uninstaller:
+
+- installs `Tourelle.exe` and `tourelle-cli.exe` in `Program Files\Tourelle`, and writes the camera
+  source `TourelleCamera.dll` there from `Tourelle.exe`;
+- registers that DLL as a COM class (`HKLM\Software\Classes\CLSID`) for the Windows Camera Frame
+  Server;
+- binds Microsoft's WinUSB driver to the camera's video function (USB `046D:0994`, interface 0)
+  instead of `usbvideo.sys`, and restricts access to that device to SYSTEM, administrators and
+  the camera service;
+- registers the *Tourelle Camera* virtual camera.
+
+Settings live in `HKCU\Software\Tourelle`. *Start with Windows* adds a value under
+`HKCU\...\CurrentVersion\Run`. Uninstalling removes both and gives the camera back to
+`usbvideo.sys`.
+
 ## Privacy
 
-Tourelle collects, stores and sends no data. The video never leaves your computer. *Copy
-diagnostics* only puts text on your clipboard, and only when you ask for it.
+This program will not transfer any information to other networked systems unless specifically
+requested by the user or the person installing or operating it. Tourelle collects, stores and
+sends no data, and the video never leaves your computer. *Copy diagnostics* only puts text on your
+clipboard, and only when you ask for it. The menu links (project page, documentation) open your
+browser only when you click them.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io), certificate by
+[SignPath Foundation](https://signpath.org) *(application in progress: until it is approved,
+releases are unsigned)*.
+
+- Every release is built from this repository by GitHub Actions
+  ([.github/workflows/build.yml](.github/workflows/build.yml)); nothing built on a personal
+  computer is signed.
+- Every signing request is approved by hand. Details: [docs/signing.md](docs/signing.md).
+
+Team roles:
+
+| Role | Members |
+|---|---|
+| Committers and reviewers | [padashtan](https://github.com/padashtan) |
+| Approvers | [padashtan](https://github.com/padashtan) |
 
 ## Trademarks
 
