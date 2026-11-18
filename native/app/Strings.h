@@ -93,6 +93,10 @@ struct Texts {
     const wchar_t* followOn;
     const wchar_t* followOff;
     const wchar_t* followUnavailable;
+    const wchar_t* menuPreview;     // checked item: Tourelle shows (and holds) the video
+    const wchar_t* previewPaused;   // video area while paused
+    const wchar_t* needsPreview;
+    const wchar_t* cameraBusy;      // video area: another app streams the camera
     const wchar_t* menuHotkeys;
     const wchar_t* menuGamepad;
     const wchar_t* menuDiagnostics;
@@ -208,6 +212,10 @@ inline constexpr Texts kEnglish{
     .followOn = L"Following your face.",
     .followOff = L"Face following off.",
     .followUnavailable = L"Face detection is not available on this PC.",
+    .menuPreview = L"Video in Tourelle",
+    .previewPaused = L"Video paused: the camera is free for Teams, Camera and other apps. The controls still work. Click here to resume.",
+    .needsPreview = L"Turn the video back on in Tourelle to use this.",
+    .cameraBusy = L"The camera is in use by another app (Teams, Camera...). The controls still work. Click here to take the video back.",
     .menuHotkeys = L"Global shortcuts (Ctrl+Alt+arrows)",
     .menuGamepad = L"Xbox controller",
     .menuDiagnostics = L"Copy diagnostics",
@@ -325,6 +333,10 @@ inline constexpr Texts kFrench{
     .followOn = L"Suivi du visage activé.",
     .followOff = L"Suivi du visage désactivé.",
     .followUnavailable = L"La détection de visage n'est pas disponible sur ce PC.",
+    .menuPreview = L"Vidéo dans Tourelle",
+    .previewPaused = L"Vidéo en pause : la caméra est libre pour Teams, Caméra et les autres applications. Les commandes restent actives. Cliquez ici pour reprendre.",
+    .needsPreview = L"Réactivez la vidéo dans Tourelle pour utiliser cette fonction.",
+    .cameraBusy = L"La caméra est utilisée par une autre application (Teams, Caméra…). Les commandes restent actives. Cliquez ici pour reprendre la vidéo.",
     .menuHotkeys = L"Raccourcis globaux (Ctrl+Alt+flèches)",
     .menuGamepad = L"Manette Xbox",
     .menuDiagnostics = L"Copier le diagnostic",
@@ -442,6 +454,10 @@ inline constexpr Texts kSpanish{
     .followOn = L"Siguiendo tu cara.",
     .followOff = L"Seguimiento de cara desactivado.",
     .followUnavailable = L"La detección de caras no está disponible en este PC.",
+    .menuPreview = L"Vídeo en Tourelle",
+    .previewPaused = L"Vídeo en pausa: la cámara está libre para Teams, Cámara y otras aplicaciones. Los controles siguen funcionando. Haga clic aquí para reanudar.",
+    .needsPreview = L"Vuelva a activar el vídeo en Tourelle para usar esta función.",
+    .cameraBusy = L"Otra aplicación está usando la cámara (Teams, Cámara…). Los controles siguen funcionando. Haga clic aquí para recuperar el vídeo.",
     .menuHotkeys = L"Atajos globales (Ctrl+Alt+flechas)",
     .menuGamepad = L"Mando de Xbox",
     .menuDiagnostics = L"Copiar diagnóstico",
@@ -562,6 +578,10 @@ inline constexpr Texts kPolish{
     .followOn = L"Śledzenie twarzy włączone.",
     .followOff = L"Śledzenie twarzy wyłączone.",
     .followUnavailable = L"Wykrywanie twarzy nie jest dostępne na tym komputerze.",
+    .menuPreview = L"Wideo w Tourelle",
+    .previewPaused = L"Wideo wstrzymane: kamera jest wolna dla Teams, aplikacji Aparat i innych. Sterowanie nadal działa. Kliknij tutaj, aby wznowić.",
+    .needsPreview = L"Włącz ponownie wideo w Tourelle, aby użyć tej funkcji.",
+    .cameraBusy = L"Kamera jest używana przez inną aplikację (Teams, Aparat…). Sterowanie nadal działa. Kliknij tutaj, aby odzyskać wideo.",
     .menuHotkeys = L"Skróty globalne (Ctrl+Alt+strzałki)",
     .menuGamepad = L"Kontroler Xbox",
     .menuDiagnostics = L"Kopiuj diagnostykę",

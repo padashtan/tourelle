@@ -8,6 +8,7 @@
 #include <dbt.h>
 #include <dwmapi.h>
 #include <mfapi.h>
+#include <mferror.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <shellapi.h>
@@ -93,7 +94,7 @@ enum ControlId : int {
     IdFollow = 150,
     IdMenuAbout = 200, IdMenuLicense, IdMenuNotices, IdMenuProject, IdMenuDocs, IdMenuRecenter, IdMenuInstall,
     IdMenuUninstall, IdMenuQuit, IdMenuShow, IdMenuAutostart, IdMenuInvertPan, IdMenuInvertTilt,
-    IdMenuHotkeys, IdMenuGamepad, IdMenuDiagnostics, IdMenuImageSettings, IdMenuFollow,
+    IdMenuHotkeys, IdMenuGamepad, IdMenuDiagnostics, IdMenuImageSettings, IdMenuFollow, IdMenuPreview,
     IdMenuLanguage0 = 250,  // ..IdMenuLanguage0 + language count
     IdTab0 = 300,  // ..IdTab0 + 2
     IdProject = 310, IdClose,
@@ -108,6 +109,7 @@ constexpr UINT WM_APP_SHOW = WM_APP + 4;  // sent by a second instance
 constexpr UINT WM_APP_STATUS = WM_APP + 5;  // lParam: std::wstring* from a worker thread, freed by the UI
 constexpr UINT WM_APP_PRESET_SAVE = WM_APP + 6;  // wParam: preset index (right-click on a preset button)
 constexpr UINT WM_APP_FOLLOW_OFF = WM_APP + 7;  // face tracking stopped by itself
+constexpr UINT WM_APP_CAMERA_BUSY = WM_APP + 8;  // another app streams the camera: preview stopped
 constexpr UINT kTrayIconId = 1;
 constexpr wchar_t kRunKey[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 constexpr wchar_t kRunValue[] = L"Tourelle";
@@ -151,6 +153,11 @@ struct App {
     bool invertTilt = false;
     bool hotkeys = true;
     bool gamepad = true;
+    // Video paused: Tourelle releases the camera stream so other apps (Teams, Camera)
+    // can open it, and keeps driving the motors through a temporary source.
+    bool videoPaused = false;
+    // Same, set automatically when another app already streams the camera (not saved).
+    bool cameraBusy = false;
     bool presetSet[kPresetCount]{};
     tourelle::core::PanTilt presetPosition[kPresetCount]{};
 
@@ -248,6 +255,7 @@ void LoadSettings() {
     g.stepIndex = static_cast<int>(std::min<DWORD>(ReadSetting(L"Step", 1), 3));
     g.hotkeys = ReadSetting(L"Hotkeys", 1) != 0;
     g.gamepad = ReadSetting(L"Gamepad", 1) != 0;
+    g.videoPaused = ReadSetting(L"VideoPaused", 0) != 0;
     for (int i = 0; i < kPresetCount; ++i) {
         const std::wstring name = L"Preset" + std::to_wstring(i + 1);
         DWORD packed = 0, packedSize = sizeof(packed);
@@ -411,13 +419,17 @@ public:
     void Detach() { active_ = false; }
     HANDLE Failed() const { return failed_; }
     HANDLE Flushed() const { return flushed_; }
+    HRESULT Status() const { return status_; }
+    bool GotFrame() const { return gotFrame_; }
 
     IFACEMETHODIMP OnReadSample(HRESULT status, DWORD, DWORD flags, LONGLONG, IMFSample* sample) override {
         if (FAILED(status) || (flags & (MF_SOURCE_READERF_ERROR | MF_SOURCE_READERF_ENDOFSTREAM))) {
+            status_ = FAILED(status) ? status : E_FAIL;
             SetEvent(failed_);
             return S_OK;
         }
         if (sample) {
+            gotFrame_ = true;
             CopyFrame(sample, width_, height_);
             ++g.frames;
             PostMessageW(g.window, WM_APP_FRAME, 0, 0);
@@ -438,7 +450,15 @@ private:
     IMFSourceReader* reader_ = nullptr;
     UINT32 width_ = 0, height_ = 0;
     std::atomic<bool> active_{true};
+    std::atomic<HRESULT> status_{S_OK};
+    std::atomic<bool> gotFrame_{false};
 };
+
+// Another app (Teams, Camera...) already streams the camera: Tourelle must not take it.
+bool CameraBusy(HRESULT hr) {
+    return hr == MF_E_HW_MFT_FAILED_START_STREAMING || hr == MF_E_VIDEO_RECORDING_DEVICE_PREEMPTED ||
+           hr == HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION) || hr == HRESULT_FROM_WIN32(ERROR_BUSY);
+}
 
 void VideoLoop(HANDLE stop) {
     if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return;
@@ -473,6 +493,10 @@ void VideoLoop(HANDLE stop) {
         if (FAILED(hr)) {
             reader.Reset();
             source->Shutdown();
+            if (CameraBusy(hr)) {
+                PostMessageW(g.window, WM_APP_CAMERA_BUSY, 0, 0);
+                break;
+            }
             SetVideoMessage(T().noStart);
             if (stopped(2000)) break;
             continue;
@@ -497,6 +521,10 @@ void VideoLoop(HANDLE stop) {
         reader.Reset();
         source->Shutdown();
         if (reason == WAIT_OBJECT_0) break;
+        if (!callback->GotFrame() && CameraBusy(callback->Status())) {
+            PostMessageW(g.window, WM_APP_CAMERA_BUSY, 0, 0);
+            break;
+        }
         SetVideoMessage(T().interrupted);
         if (stopped(1000)) break;
     }
@@ -544,6 +572,40 @@ void StopVideo() {
         g.videoThread.detach();  // it still owns its stop event and exits on its own
     }
     g.stopVideo = nullptr;
+}
+
+// Runs the preview exactly when someone needs it: the window is shown or face
+// tracking runs, and the user has not paused the video to free the camera.
+bool VideoOff() { return g.videoPaused || g.cameraBusy; }
+
+void UpdateVideo() {
+    const bool ready = g.setup.Ready();
+    if (ready && !VideoOff() && (IsWindowVisible(g.window) || g.following)) {
+        StartVideo();
+        return;
+    }
+    StopVideo();
+    if (ready && VideoOff()) SetVideoMessage(g.cameraBusy ? T().cameraBusy : T().previewPaused);
+}
+
+void SetFollowing(bool on);
+
+// Pausing is saved; resuming also retries a camera another app was using.
+void SetVideoPaused(bool paused) {
+    if (paused == VideoOff()) return;
+    if (paused) SetFollowing(false);  // tracking needs the frames
+    g.videoPaused = paused;
+    g.cameraBusy = false;
+    WriteSetting(L"VideoPaused", paused);
+    UpdateVideo();
+    InvalidateRect(g.video, nullptr, FALSE);
+}
+
+// UI thread, from the video thread: it stopped because another app streams the camera.
+void OnCameraBusy() {
+    SetFollowing(false);
+    g.cameraBusy = true;
+    UpdateVideo();
 }
 
 // Motor ----------------------------------------------------------------------
@@ -698,7 +760,12 @@ void SetFocusValue(int value) {
 
 // Contrast autofocus on the preview: coarse then fine sweep of the focus motor.
 void Autofocus() {
-    if (!g.setup.Ready() || g.autofocusing.exchange(true)) return;
+    if (!g.setup.Ready()) return;
+    if (VideoOff()) {  // the sweep measures sharpness on the preview
+        SetStatus(T().needsPreview);
+        return;
+    }
+    if (g.autofocusing.exchange(true)) return;
     SetStatus(T().focusing);
     std::thread([] {
         if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) {
@@ -795,6 +862,10 @@ void SetFollowing(bool on) {
     if (on == g.following.load()) return;
     if (on) {
         if (!g.setup.Ready()) return;
+        if (VideoOff()) {
+            SetStatus(T().needsPreview);
+            return;
+        }
         g.following = true;
         StartVideo();  // tracking needs frames, even while the window is hidden
         g.stopFollow = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -942,6 +1013,7 @@ bool HandleKey(WPARAM key) {
         case VK_HOME: Move(0, 0); return true;
         case '1': case '2': case '3': case '4': GoToPreset(static_cast<int>(key - '1')); return true;
         case 'F': SetFollowing(!g.following); return true;
+        case 'V': SetVideoPaused(!VideoOff()); return true;
         default: return false;
     }
 }
@@ -971,8 +1043,9 @@ void RefreshSetup() {
     InvalidateRect(g.window, &card, FALSE);
 
     if (ready) {
-        // No preview while hidden in the notification area, unless face tracking needs it.
-        if (IsWindowVisible(g.window) || g.following) StartVideo();
+        // No preview while hidden in the notification area (unless face tracking needs
+        // it) or while the video is paused for another app.
+        UpdateVideo();
         if (!g.demo) {
             uint8_t focus = 0;
             if (SUCCEEDED(WithSource([&](IUnknown* source) { return tourelle::client::GetFocus(source, &focus); }))) {
@@ -1104,7 +1177,7 @@ void ShowMain() {
     if (IsIconic(g.window)) ShowWindow(g.window, SW_RESTORE);
     ShowWindow(g.window, SW_SHOW);
     SetForegroundWindow(g.window);
-    if (g.setup.Ready()) StartVideo();
+    UpdateVideo();
 }
 
 void HideMain() {
@@ -1129,6 +1202,8 @@ void ShowTrayMenu(int x, int y) {
     AppendMenuW(menu, MF_STRING, IdMenuShow, visible ? T().menuHide : T().menuShow);
     SetMenuDefaultItem(menu, IdMenuShow, FALSE);
     AppendMenuW(menu, MF_STRING | (g.setup.Ready() ? 0 : MF_GRAYED), IdMenuRecenter, T().menuRecenter);
+    AppendMenuW(menu, MF_STRING | (VideoOff() ? 0 : MF_CHECKED) | (g.setup.Ready() ? 0 : MF_GRAYED),
+                IdMenuPreview, T().menuPreview);
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (IsAutostart() ? MF_CHECKED : 0), IdMenuAutostart, T().menuAutostart);
     AppendMenuW(menu, MF_STRING, IdMenuAbout, T().menuAbout);
@@ -1143,6 +1218,7 @@ void ShowTrayMenu(int x, int y) {
     switch (command) {
         case IdMenuShow: visible ? HideMain() : ShowMain(); break;
         case IdMenuRecenter: g.lastMove = {}; Move(0, 0); break;
+        case IdMenuPreview: SetVideoPaused(!VideoOff()); break;
         case IdMenuAutostart: SetAutostart(!IsAutostart()); break;
         case IdMenuAbout: ShowMain(); ShowAbout(0); break;
         case IdMenuQuit: Quit(); break;
@@ -1466,10 +1542,15 @@ LRESULT CALLBACK VideoProc(HWND window, UINT message, WPARAM wParam, LPARAM lPar
         case WM_SETCURSOR: {
             std::lock_guard guard(g.lock);
             const bool live = !g.frame.empty() && g.setup.Ready();
-            SetCursor(LoadCursorW(nullptr, live ? IDC_CROSS : IDC_ARROW));
+            const bool paused = VideoOff() && g.setup.Ready();
+            SetCursor(LoadCursorW(nullptr, live ? IDC_CROSS : paused ? IDC_HAND : IDC_ARROW));
             return TRUE;
         }
         case WM_LBUTTONDOWN: {
+            if (VideoOff() && g.setup.Ready()) {  // "Click here to resume"
+                SetVideoPaused(false);
+                return 0;
+            }
             // Click to aim: bring the clicked point to the center of the image.
             RECT area;
             GetClientRect(window, &area);
@@ -1513,6 +1594,9 @@ void ShowMenu() {
     const std::wstring follow = std::wstring(T().followFace) + L"\tF";
     AppendMenuW(menu, MF_STRING | (g.following ? MF_CHECKED : 0) | (g.setup.Ready() ? 0 : MF_GRAYED), IdMenuFollow,
                 follow.c_str());
+    const std::wstring preview = std::wstring(T().menuPreview) + L"\tV";
+    AppendMenuW(menu, MF_STRING | (VideoOff() ? 0 : MF_CHECKED) | (g.setup.Ready() ? 0 : MF_GRAYED), IdMenuPreview,
+                preview.c_str());
     AppendMenuW(menu, MF_STRING | (g.hotkeys ? MF_CHECKED : 0), IdMenuHotkeys, T().menuHotkeys);
     AppendMenuW(menu, MF_STRING | (g.gamepad ? MF_CHECKED : 0) | (g.pad360 && g.pad360->Available() ? 0 : MF_GRAYED),
                 IdMenuGamepad, T().menuGamepad);
@@ -1556,6 +1640,7 @@ void ShowMenu() {
             WriteSetting(L"InvertTilt", g.invertTilt);
             break;
         case IdMenuFollow: SetFollowing(!g.following); break;
+        case IdMenuPreview: SetVideoPaused(!VideoOff()); break;
         case IdMenuHotkeys:
             g.hotkeys = !g.hotkeys;
             WriteSetting(L"Hotkeys", g.hotkeys);
@@ -1785,6 +1870,9 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
             return 0;
         case WM_APP_FOLLOW_OFF:
             SetFollowing(false);
+            return 0;
+        case WM_APP_CAMERA_BUSY:
+            OnCameraBusy();
             return 0;
         case WM_APP_TRAY:  // NOTIFYICON_VERSION_4: event in LOWORD(lParam), anchor point in wParam
             switch (LOWORD(lParam)) {
