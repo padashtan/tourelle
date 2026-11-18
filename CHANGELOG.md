@@ -5,6 +5,7 @@ All notable changes to Tourelle. Versions follow [Semantic Versioning](https://s
 ## 1.0.0 - 2026-11-18
 
 ### Added
+- Preview resolution in the menu: 640 × 480 (30 fps), 800 × 600 (25 fps) or 960 × 720 (10 fps), remembered.
 - Share the camera with Teams, Camera and other apps: *Video in Tourelle* (menu, tray menu or the V key) releases the video and keeps the controls. When another app already uses the camera, Tourelle leaves it alone and keeps only the controls.
 - **Standard camera controls**: pan, tilt and focus (`PROPSETID_VIDCAP_CAMERACONTROL`), plus image
   settings such as brightness, contrast, saturation, sharpness, white balance, gain and power line

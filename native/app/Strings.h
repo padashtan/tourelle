@@ -96,6 +96,8 @@ struct Texts {
     const wchar_t* menuPreview;     // checked item: Tourelle shows (and holds) the video
     const wchar_t* previewPaused;   // video area while paused
     const wchar_t* needsPreview;
+    const wchar_t* menuResolution;
+    const wchar_t* framesPerSecond;  // unit after a number, e.g. "30 fps"
     const wchar_t* cameraBusy;      // video area: another app streams the camera
     const wchar_t* menuHotkeys;
     const wchar_t* menuGamepad;
@@ -215,6 +217,8 @@ inline constexpr Texts kEnglish{
     .menuPreview = L"Video in Tourelle",
     .previewPaused = L"Video paused: the camera is free for Teams, Camera and other apps. The controls still work. Click here to resume.",
     .needsPreview = L"Turn the video back on in Tourelle to use this.",
+    .menuResolution = L"Preview resolution",
+    .framesPerSecond = L"fps",
     .cameraBusy = L"The camera is in use by another app (Teams, Camera...). The controls still work. Click here to take the video back.",
     .menuHotkeys = L"Global shortcuts (Ctrl+Alt+arrows)",
     .menuGamepad = L"Xbox controller",
@@ -336,6 +340,8 @@ inline constexpr Texts kFrench{
     .menuPreview = L"Vidéo dans Tourelle",
     .previewPaused = L"Vidéo en pause : la caméra est libre pour Teams, Caméra et les autres applications. Les commandes restent actives. Cliquez ici pour reprendre.",
     .needsPreview = L"Réactivez la vidéo dans Tourelle pour utiliser cette fonction.",
+    .menuResolution = L"Résolution de l'aperçu",
+    .framesPerSecond = L"i/s",
     .cameraBusy = L"La caméra est utilisée par une autre application (Teams, Caméra…). Les commandes restent actives. Cliquez ici pour reprendre la vidéo.",
     .menuHotkeys = L"Raccourcis globaux (Ctrl+Alt+flèches)",
     .menuGamepad = L"Manette Xbox",
@@ -457,6 +463,8 @@ inline constexpr Texts kSpanish{
     .menuPreview = L"Vídeo en Tourelle",
     .previewPaused = L"Vídeo en pausa: la cámara está libre para Teams, Cámara y otras aplicaciones. Los controles siguen funcionando. Haga clic aquí para reanudar.",
     .needsPreview = L"Vuelva a activar el vídeo en Tourelle para usar esta función.",
+    .menuResolution = L"Resolución de la vista previa",
+    .framesPerSecond = L"fps",
     .cameraBusy = L"Otra aplicación está usando la cámara (Teams, Cámara…). Los controles siguen funcionando. Haga clic aquí para recuperar el vídeo.",
     .menuHotkeys = L"Atajos globales (Ctrl+Alt+flechas)",
     .menuGamepad = L"Mando de Xbox",
@@ -581,6 +589,8 @@ inline constexpr Texts kPolish{
     .menuPreview = L"Wideo w Tourelle",
     .previewPaused = L"Wideo wstrzymane: kamera jest wolna dla Teams, aplikacji Aparat i innych. Sterowanie nadal działa. Kliknij tutaj, aby wznowić.",
     .needsPreview = L"Włącz ponownie wideo w Tourelle, aby użyć tej funkcji.",
+    .menuResolution = L"Rozdzielczość podglądu",
+    .framesPerSecond = L"kl./s",
     .cameraBusy = L"Kamera jest używana przez inną aplikację (Teams, Aparat…). Sterowanie nadal działa. Kliknij tutaj, aby odzyskać wideo.",
     .menuHotkeys = L"Skróty globalne (Ctrl+Alt+strzałki)",
     .menuGamepad = L"Kontroler Xbox",

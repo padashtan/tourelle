@@ -96,6 +96,7 @@ enum ControlId : int {
     IdMenuUninstall, IdMenuQuit, IdMenuShow, IdMenuAutostart, IdMenuInvertPan, IdMenuInvertTilt,
     IdMenuHotkeys, IdMenuGamepad, IdMenuDiagnostics, IdMenuImageSettings, IdMenuFollow, IdMenuPreview,
     IdMenuLanguage0 = 250,  // ..IdMenuLanguage0 + language count
+    IdMenuResolution0 = 270,  // ..IdMenuResolution0 + kPreviewModeCount
     IdTab0 = 300,  // ..IdTab0 + 2
     IdProject = 310, IdClose,
 };
@@ -124,6 +125,13 @@ constexpr int kTiltUp = -1;  // the camera's positive tilt points down
 constexpr int kPresetCount = 4;
 constexpr int kFocusStep = 16;
 constexpr int kHotkeyIds = 20;  // RegisterHotKey ids 1..kHotkeyIds
+
+// Preview modes: the ones the camera source offers (vcam/TourelleStream.cpp, kModes).
+struct PreviewMode {
+    UINT32 width, height, fps;
+};
+constexpr PreviewMode kPreviewModes[] = {{640, 480, 30}, {800, 600, 25}, {960, 720, 10}};
+constexpr int kPreviewModeCount = static_cast<int>(std::size(kPreviewModes));
 constexpr DWORD kVideoStream = static_cast<DWORD>(MF_SOURCE_READER_FIRST_VIDEO_STREAM);
 constexpr wchar_t kDocsUrl[] = TOURELLE_PROJECT_URL L"/blob/main/docs/how-it-works.md";
 
@@ -158,6 +166,7 @@ struct App {
     bool videoPaused = false;
     // Same, set automatically when another app already streams the camera (not saved).
     bool cameraBusy = false;
+    int previewMode = 0;  // index in kPreviewModes
     bool presetSet[kPresetCount]{};
     tourelle::core::PanTilt presetPosition[kPresetCount]{};
 
@@ -256,6 +265,7 @@ void LoadSettings() {
     g.hotkeys = ReadSetting(L"Hotkeys", 1) != 0;
     g.gamepad = ReadSetting(L"Gamepad", 1) != 0;
     g.videoPaused = ReadSetting(L"VideoPaused", 0) != 0;
+    g.previewMode = static_cast<int>(std::min<DWORD>(ReadSetting(L"PreviewMode", 0), kPreviewModeCount - 1));
     for (int i = 0; i < kPresetCount; ++i) {
         const std::wstring name = L"Preset" + std::to_wstring(i + 1);
         DWORD packed = 0, packedSize = sizeof(packed);
@@ -460,6 +470,19 @@ bool CameraBusy(HRESULT hr) {
            hr == HRESULT_FROM_WIN32(ERROR_SHARING_VIOLATION) || hr == HRESULT_FROM_WIN32(ERROR_BUSY);
 }
 
+// The camera's native type with the frame size of mode, or null (default mode).
+ComPtr<IMFMediaType> FindNativeType(IMFSourceReader* reader, const PreviewMode& mode) {
+    for (DWORD i = 0;; ++i) {
+        ComPtr<IMFMediaType> type;
+        if (FAILED(reader->GetNativeMediaType(kVideoStream, i, &type))) return nullptr;
+        UINT32 width = 0, height = 0;
+        if (SUCCEEDED(MFGetAttributeSize(type.Get(), MF_MT_FRAME_SIZE, &width, &height)) && width == mode.width &&
+            height == mode.height) {
+            return type;
+        }
+    }
+}
+
 void VideoLoop(HANDLE stop) {
     if (FAILED(CoInitializeEx(nullptr, COINIT_MULTITHREADED))) return;
     const auto stopped = [stop](DWORD milliseconds) { return WaitForSingleObject(stop, milliseconds) == WAIT_OBJECT_0; };
@@ -480,7 +503,17 @@ void VideoLoop(HANDLE stop) {
         if (SUCCEEDED(hr)) hr = attributes->SetUINT32(MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING, TRUE);
         if (SUCCEEDED(hr)) hr = attributes->SetUnknown(MF_SOURCE_READER_ASYNC_CALLBACK, callback.Get());
         if (SUCCEEDED(hr)) hr = MFCreateSourceReaderFromMediaSource(source.Get(), attributes.Get(), &reader);
+        // Camera mode chosen in the menu, converted to RGB32 by the source reader.
+        ComPtr<IMFMediaType> native;
+        if (SUCCEEDED(hr)) native = FindNativeType(reader.Get(), kPreviewModes[g.previewMode]);
         if (SUCCEEDED(hr)) hr = MFCreateMediaType(&type);
+        if (SUCCEEDED(hr) && native) {
+            // Only the size and rate: the native stride and sample size do not apply to RGB32.
+            const PreviewMode& mode = kPreviewModes[g.previewMode];
+            hr = reader->SetCurrentMediaType(kVideoStream, nullptr, native.Get());
+            if (SUCCEEDED(hr)) hr = MFSetAttributeSize(type.Get(), MF_MT_FRAME_SIZE, mode.width, mode.height);
+            if (SUCCEEDED(hr)) hr = MFSetAttributeRatio(type.Get(), MF_MT_FRAME_RATE, mode.fps, 1);
+        }
         if (SUCCEEDED(hr)) hr = type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Video);
         if (SUCCEEDED(hr)) hr = type->SetGUID(MF_MT_SUBTYPE, MFVideoFormat_RGB32);
         if (SUCCEEDED(hr)) hr = reader->SetCurrentMediaType(kVideoStream, nullptr, type.Get());
@@ -589,6 +622,14 @@ void UpdateVideo() {
 }
 
 void SetFollowing(bool on);
+
+void SetPreviewMode(int mode) {
+    if (mode == g.previewMode) return;
+    g.previewMode = mode;
+    WriteSetting(L"PreviewMode", static_cast<DWORD>(mode));
+    StopVideo();  // restarts in the new mode
+    UpdateVideo();
+}
 
 // Pausing is saved; resuming also retries a camera another app was using.
 void SetVideoPaused(bool paused) {
@@ -1597,6 +1638,15 @@ void ShowMenu() {
     const std::wstring preview = std::wstring(T().menuPreview) + L"\tV";
     AppendMenuW(menu, MF_STRING | (VideoOff() ? 0 : MF_CHECKED) | (g.setup.Ready() ? 0 : MF_GRAYED), IdMenuPreview,
                 preview.c_str());
+    HMENU resolutions = CreatePopupMenu();
+    for (int i = 0; i < kPreviewModeCount; ++i) {
+        const PreviewMode& mode = kPreviewModes[i];
+        const std::wstring label = std::to_wstring(mode.width) + L" × " + std::to_wstring(mode.height) + L"  (" +
+                                   std::to_wstring(mode.fps) + L" " + T().framesPerSecond + L")";
+        AppendMenuW(resolutions, MF_STRING | (i == g.previewMode ? MF_CHECKED : 0), IdMenuResolution0 + i, label.c_str());
+    }
+    AppendMenuW(menu, MF_POPUP | (g.demo ? MF_GRAYED : 0), reinterpret_cast<UINT_PTR>(resolutions),
+                T().menuResolution);  // owned by menu
     AppendMenuW(menu, MF_STRING | (g.hotkeys ? MF_CHECKED : 0), IdMenuHotkeys, T().menuHotkeys);
     AppendMenuW(menu, MF_STRING | (g.gamepad ? MF_CHECKED : 0) | (g.pad360 && g.pad360->Available() ? 0 : MF_GRAYED),
                 IdMenuGamepad, T().menuGamepad);
@@ -1656,6 +1706,8 @@ void ShowMenu() {
         default:
             if (command >= IdMenuLanguage0 && command < IdMenuLanguage0 + kLanguageCount) {
                 SetLanguage(command - IdMenuLanguage0);
+            } else if (command >= IdMenuResolution0 && command < IdMenuResolution0 + kPreviewModeCount) {
+                SetPreviewMode(command - IdMenuResolution0);
             }
             break;
     }
