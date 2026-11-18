@@ -26,7 +26,11 @@ using it.
 - **Focus**: the camera's focus motor, with near/far buttons and contrast autofocus.
 - **Standard Windows camera controls**: apps and Windows can drive pan, tilt, focus, brightness,
   contrast, white balance and the other image settings without Tourelle.
-- **Video**: 640×480 at 30 fps, 800×600 at 25 fps, 960×720 at 10 fps (NV12 or YUY2).
+- **Video**: 640×480 at 30 fps, 800×600 at 25 fps, 960×720 at 10 fps (NV12 or YUY2). The video
+  app picks the resolution; the Tourelle preview has its own choice in the ☰ menu.
+- **Shares the camera**: turn off *Video in Tourelle* (☰ menu, tray menu or V) and Teams, the Camera
+  app and others can open the camera while the controls keep working. If another app already
+  uses the camera, Tourelle leaves it alone and keeps only the controls.
 - **Interface**: English, French, Spanish and Polish. Notification area icon, start with Windows.
 - **One-click setup and uninstall**, with no third-party driver and no kernel code.
 
@@ -64,12 +68,13 @@ click **Install**.
 | Save a position | right-click 1 – 4 | | |
 | Follow my face | *Follow my face* | F | Ctrl+Alt+F |
 | Focus | − / AF / + | | |
+| Release the video for other apps | ☰ > *Video in Tourelle* | V | |
 
 **Xbox controller**: the left stick moves the head, the D-pad moves it step by step, A recenters,
 B follows your face and X runs the autofocus.
 
-The **☰ menu** holds the options: inverting left/right or up/down, language, global shortcuts,
-controller, image settings, start with Windows, diagnostics, and the About, License and Notices
+The **☰ menu** holds the options: inverting left/right or up/down, video in Tourelle, preview
+resolution, language, global shortcuts, controller, image settings, start with Windows, diagnostics, and the About, License and Notices
 pages.
 
 Closing the window keeps Tourelle in the notification area, next to the clock. The camera, and its
@@ -109,7 +114,8 @@ native\build\Tourelle.exe --demo      :: the app with a synthetic image, no came
 ```
 
 The CI runs the build with warnings as errors, the unit tests, the MSVC code analysis (`/analyze`),
-the unit tests under AddressSanitizer, and PSScriptAnalyzer. It also builds the installer.
+the unit tests under AddressSanitizer, PSScriptAnalyzer, and a planted-DLL test (no DLL is ever
+loaded from the executables' folder). It also builds the installer.
 [CONTRIBUTING.md](CONTRIBUTING.md) describes the layout and the hardware checks.
 
 ## Privacy
