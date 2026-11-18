@@ -1985,13 +1985,14 @@ int WINAPI wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE, _In_ PWSTR, _In
     // it runs elevated from a user-writable folder. Before this line only KnownDLLs are
     // loaded (see TOURELLE_DELAYLOAD_* in CMakeLists.txt).
     SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
-    // Planted-DLL check used by the CI: reaching this line proves startup loaded none.
-    if (wcsstr(GetCommandLineW(), L"--self-test")) return 0;
     int argc = 0;
     LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     int result;
     const auto is = [&](const wchar_t* option) { return argc > 1 && _wcsicmp(argv[1], option) == 0; };
-    if (is(L"--install") || is(L"--install-quiet")) {
+    if (is(L"--self-test")) {
+        // Planted-DLL check used by the CI: reaching this line proves startup loaded none.
+        result = 0;
+    } else if (is(L"--install") || is(L"--install-quiet")) {
         result = RunAdminTask(true, is(L"--install-quiet"));
     } else if (is(L"--uninstall") || is(L"--uninstall-quiet")) {
         result = RunAdminTask(false, is(L"--uninstall-quiet"));

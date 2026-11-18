@@ -142,8 +142,6 @@ jobs:
     needs: [build, analyze, sanitizer, lint, tag-check]
     runs-on: windows-2022
     environment: release
-    env:
-      SIGNPATH_ORG: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
       - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756  # v1
@@ -176,8 +174,14 @@ jobs:
         shell: pwsh
         run: |
           if ((Get-AuthenticodeSignature signed-dll\TourelleCamera.dll).Status -ne 'Valid') { throw "DLL not signed" }
-          cmake -S native -B build -DTOURELLE_EMBEDDED_SOURCE="$env:GITHUB_WORKSPACE/signed-dll/TourelleCamera.dll"
+          $signed = "$env:GITHUB_WORKSPACE/signed-dll/TourelleCamera.dll"
+          cmake -S native -B build -DTOURELLE_EMBEDDED_SOURCE="$signed"
+          if ($LASTEXITCODE) { throw "cmake configure failed" }
           cmake --build build --target Tourelle tourelle-cli
+          if ($LASTEXITCODE) { throw "cmake build failed" }
+          # The DLL embedded in Tourelle.exe (RCDATA 2) must be the signed one, byte for byte.
+          tools\extract-embedded-source.ps1 -Exe build\Tourelle.exe -Out embedded.dll
+          if ((Get-FileHash embedded.dll).Hash -ne (Get-FileHash $signed).Hash) { throw "Tourelle.exe does not embed the signed DLL" }
           New-Item -ItemType Directory -Force to-sign-exe | Out-Null
           Copy-Item build\Tourelle.exe, build\tourelle-cli.exe to-sign-exe
       - id: exe
@@ -203,6 +207,7 @@ jobs:
             if ((Get-AuthenticodeSignature "signed-exe\$file").Status -ne 'Valid') { throw "$file not signed" }
           }
           tools\test-planted-dlls.ps1 -BuildDir signed-exe
+          if ($LASTEXITCODE) { throw "planted-DLL test failed on the signed executables" }
           New-Item -ItemType Directory -Force dist\tourelle | Out-Null
           Copy-Item signed-exe\Tourelle.exe, signed-exe\tourelle-cli.exe, README.md, LICENSE, CHANGELOG.md dist\tourelle
           Compress-Archive -Path dist\tourelle\* -DestinationPath dist\tourelle-windows-x64.zip
@@ -230,8 +235,11 @@ jobs:
       - name: Collect the release files
         shell: pwsh
         run: |
+          $setups = @(Get-ChildItem signed-setup -Filter 'tourelle-setup-*.exe')
+          if ($setups.Count -ne 1) { throw "expected one signed setup, found $($setups.Count)" }
+          if ((Get-AuthenticodeSignature $setups[0].FullName).Status -ne 'Valid') { throw "setup not signed" }
           New-Item -ItemType Directory -Force release | Out-Null
-          Copy-Item dist\tourelle-windows-x64.zip, signed-setup\*.exe release
+          Copy-Item dist\tourelle-windows-x64.zip, $setups[0].FullName release
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
         with:
           name: tourelle-windows-x64-signed

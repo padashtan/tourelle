@@ -33,7 +33,18 @@ three rounds, in this order:
 3. The installer, built from the signed executables.
 
 Each round is a separate SignPath signing request on a GitHub artifact. Allow the policy to sign PE
-files (`.dll` and `.exe`).
+files (`.dll` and `.exe`), and set up the SignPath artifact configuration for three shapes: a zip with
+`TourelleCamera.dll`, a zip with `Tourelle.exe` and `tourelle-cli.exe`, and a zip with
+`tourelle-setup-<version>.exe`.
+
+Before packaging, the job checks that each file it received is validly signed and that the DLL
+embedded in `Tourelle.exe` is the signed one, byte for byte (`tools/extract-embedded-source.ps1`).
+
+**Known limit: the Inno Setup uninstaller is not signed.** Inno Setup writes `unins000.exe` from
+inside the signed setup into `Program Files\Tourelle`, which only administrators can change. Signing it
+needs Inno's `SignTool` hook at compile time, which SignPath's GitHub flow does not offer. The
+uninstall confirmation prompt therefore shows an unknown publisher. Uninstalling from *Settings >
+Apps* works the same.
 
 Protect what feeds the signer:
 
