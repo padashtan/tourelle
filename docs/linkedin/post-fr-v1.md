@@ -1,28 +1,55 @@
 Ma webcam avait un torticolis. Je l'ai soignée en C++. 🦒
 
-Le patient : une Logitech QuickCam Sphere AF, la petite boule motorisée de la fin des années 2000 qui tourne la tête toute seule.
+J'ai une vieille Logitech QuickCam Sphere AF. Une webcam motorisée de la fin des années 2000, capable de pivoter pour suivre son utilisateur.
 
-Le diagnostic : sous Windows 11, elle voit très bien… mais elle ne peut plus bouger le cou. Le pilote d'origine est parti à la retraite sans laisser d'adresse. Résultat : une caméra pan/tilt qui regarde fixement le même coin de plafond. Ambiance réunion du lundi matin.
+Sous Windows 11, elle fonctionnait encore parfaitement… enfin, presque.
 
-L'enquête (avec Claude comme interne de garde) :
-🔍 On ouvre le dossier médical, c'est-à-dire les descripteurs USB.
-🕵️ Les moteurs sont bien là, mais déclarés dans une case « vendeur » que Windows ne lit jamais. Ils étaient cachés à la vue de tous depuis le début.
-🔧 Deux pistes ratées, une piste qui marche : on écrit nous-mêmes le pilote vidéo, en mode utilisateur, sans une ligne de code noyau.
-🎉 « Tout a bougé. » Plus belle phrase de la semaine.
+L'image était là. Mais impossible de contrôler les moteurs : le pilote d'origine n'est plus compatible.
 
-Le traitement s'appelle Tourelle, et il vient de passer en version 1.0.0 :
-• la tête bouge en direct pendant que Teams, Zoom ou OBS utilisent la caméra
-• clic sur l'image = la caméra vise ce point
-• elle suit votre visage (pratique quand on parle avec les mains)
-• 4 positions mémorisées, autofocus, raccourcis clavier, et même la manette Xbox 🎮
-• elle se met en retrait quand une autre appli a besoin de la vidéo, et garde les commandes
-• en français, anglais, espagnol et polonais
+Plutôt que de laisser cette webcam prendre la poussière, j'ai décidé de comprendre ce qui se passait sous le capot.
 
-Côté sérieux : 32 tests unitaires, analyse statique, AddressSanitizer, et trois passes d'audit de sécurité avant de demander la signature du code. On ne rigole pas avec un programme qui demande les droits administrateur.
+🔎 Première étape : comprendre pourquoi Windows ne voyait plus les moteurs.
 
-Morale : avant de jeter un vieux matériel, demandez-lui ce qu'il cache. Parfois, c'est juste un descripteur mal rangé.
+En analysant les descripteurs USB et la spécification UVC, j'ai découvert quelque chose d'assez intéressant : les commandes des moteurs étaient bien présentes, mais déclarées avec un descripteur propriétaire non standard.
 
-Open source (MIT), lien en commentaire 👇
-Projet perso, non affilié à Logitech.
+Résultat : le pilote vidéo natif de Windows ignorait complètement cette partie du matériel.
 
-#OpenSource #Windows11 #USB #Cpp #RetroEngineering #Hardware #IA
+Après plusieurs tentatives infructueuses, j'ai changé d'approche.
+
+💻 J'ai développé ma propre couche UVC en espace utilisateur, en C++, directement au-dessus de WinUSB.
+
+Pas de pilote kernel ni de pilote tiers à installer : uniquement le pilote WinUSB fourni par Microsoft. Et surtout, pas besoin de remplacer la webcam.
+
+Pour rendre tout cela exploitable par les applications Windows, j'ai également développé une caméra virtuelle basée sur Media Foundation.
+
+Le résultat : Tourelle 1.0.0 🎉
+
+Une application Windows 11 qui redonne vie à cette webcam :
+
+- 🎯 Contrôle du pan/tilt en temps réel, même lorsque Teams, Zoom ou OBS utilisent la caméra.
+- 🖱️ Clic sur l'aperçu pour orienter automatiquement la caméra.
+- 👀 Suivi automatique du visage.
+- 📍 Quatre positions mémorisables.
+- 🔍 Autofocus et commandes de mise au point.
+- 🎮 Support des manettes Xbox et raccourcis clavier.
+- 🔄 Gestion du partage vidéo : Tourelle libère le flux lorsqu'une autre application en a besoin, tout en conservant le contrôle des moteurs.
+
+Et parce qu'un projet qui touche à l'USB et au système Windows mérite une attention particulière à la sécurité :
+
+- 32 tests unitaires.
+- Analyse statique et AddressSanitizer.
+- Plusieurs passes de revue de sécurité.
+- Vérifications spécifiques contre les débordements mémoire et le chargement de DLL malveillantes.
+
+Le tout reste entièrement local : aucune image, aucune donnée personnelle n'est collectée ou envoyée.
+
+📦 Tourelle est open source, sous licence MIT.
+
+Le projet n'est affilié ni à Logitech ni à Microsoft.
+
+👉 Code source et documentation :
+https://github.com/padashtan/tourelle
+
+Finalement, une webcam de presque vingt ans avait encore quelques mouvements à faire. 😁
+
+#OpenSource #Cpp #Windows #ReverseEngineering #USB #CyberSecurity #SoftwareEngineering
