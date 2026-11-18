@@ -37,7 +37,7 @@ administrators and the Frame Server can open the WinUSB-bound camera. Also quit 
 wait a few seconds for the Frame Server to release the camera.
 
 The installer is built with Inno Setup 6:
-`iscc /DAppVersion=0.3.0 /DBinDir=..\native\build installer\Tourelle.iss`.
+`iscc /DAppVersion=1.0.0 /DBinDir=..\native\build installer\Tourelle.iss`.
 
 ## Code layout
 

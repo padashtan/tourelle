@@ -71,7 +71,7 @@ jobs:
           $hash = (Get-FileHash $setup -Algorithm SHA256).Hash
           if ($hash -ne '9C73C3BAE7ED48D44112A0F48E66742C00090BDB5BEF71D9D3C056C66E97B732') { throw "Inno Setup checksum mismatch: $hash" }
           Start-Process $setup -ArgumentList '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', "/DIR=$env:RUNNER_TEMP\inno" -Wait
-          $version = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '0.3.0' }
+          $version = if ($env:GITHUB_REF -like 'refs/tags/v*') { $env:GITHUB_REF_NAME.TrimStart('v') } else { '1.0.0' }
           & "$env:RUNNER_TEMP\inno\ISCC.exe" /Q "/DAppVersion=$version" /DBinDir=..\build installer\Tourelle.iss
           if ($LASTEXITCODE) { throw "ISCC failed" }
 

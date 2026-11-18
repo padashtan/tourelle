@@ -2,7 +2,7 @@
 
 All notable changes to Tourelle. Versions follow [Semantic Versioning](https://semver.org/).
 
-## 0.3.0
+## 1.0.0 - 2026-11-18
 
 ### Added
 - Share the camera with Teams, Camera and other apps: *Video in Tourelle* (menu, tray menu or the V key) releases the video and keeps the controls. When another app already uses the camera, Tourelle leaves it alone and keeps only the controls.

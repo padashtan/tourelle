@@ -40,6 +40,11 @@ set(TOURELLE_SYSTEM32_ONLY /DEPENDENTLOADFLAG:0x800)
 set(TOURELLE_DELAYLOAD_MF /DELAYLOAD:mfplat.dll /DELAYLOAD:mf.dll /DELAYLOAD:mfreadwrite.dll
     /DELAYLOAD:mfsensorgroup.dll)
 
+# Ninja does not track the headers a .rc file includes: rebuild the version resources
+# when the version changes.
+set_source_files_properties(app/Tourelle.rc vcam/TourelleCamera.rc PROPERTIES
+                            OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/app/Version.h)
+
 # Pure logic, no hardware: descriptor parsing, frame assembly, imaging, motor math, KS helpers.
 add_library(core STATIC
     core/UvcDescriptors.cpp core/FrameAssembler.cpp core/Imaging.cpp core/Motor.cpp core/Autofocus.cpp

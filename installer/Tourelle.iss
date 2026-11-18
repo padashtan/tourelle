@@ -1,9 +1,9 @@
 ; Tourelle installer (Inno Setup 6).
-;   iscc /DAppVersion=0.3.0 /DBinDir=..\native\build installer\Tourelle.iss
+;   iscc /DAppVersion=1.0.0 /DBinDir=..\native\build installer\Tourelle.iss
 ; BinDir holds Tourelle.exe, TourelleCamera.dll and tourelle-cli.exe.
 
 #ifndef AppVersion
-  #define AppVersion "0.3.0"
+  #define AppVersion "1.0.0"
 #endif
 #ifndef BinDir
   #define BinDir "..\native\build"
