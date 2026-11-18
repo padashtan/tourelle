@@ -43,6 +43,8 @@ Et parce qu'un projet qui touche à l'USB et au système Windows mérite une att
 
 Le tout reste entièrement local : aucune image, aucune donnée personnelle n'est collectée ou envoyée.
 
+🤖 Développé avec l'aide de Claude (Anthropic), mon binôme de code pendant tout le projet : de l'analyse des descripteurs USB jusqu'aux audits de sécurité.
+
 📦 Tourelle est open source, sous licence MIT.
 
 Le projet n'est affilié ni à Logitech ni à Microsoft.
